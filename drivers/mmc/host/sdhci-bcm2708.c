@@ -33,7 +33,6 @@
 #include <linux/io.h>
 #include <linux/dma-mapping.h>
 #include <mach/dma.h>
-#include <mach/power.h>
 
 #include "sdhci.h"
 
@@ -74,10 +73,6 @@
 
 /* Mhz clock that the EMMC core is running at. Should match the platform clockman settings */
 #define BCM2708_EMMC_CLOCK_FREQ 50000000
-
-#define POWER_OFF 0
-#define POWER_LAZY_OFF 1
-#define POWER_ON  2
 
 #define REG_EXRDFIFO_EN     0x80
 #define REG_EXRDFIFO_CFG    0x84
@@ -387,10 +382,6 @@ struct sdhci_bcm2708_priv {
 	/* tracking scatter gather progress */
 	unsigned		sg_ix;	   /* scatter gather list index */
 	unsigned		sg_done;   /* bytes in current sg_ix done */
-	/* power management */
-	BCM_POWER_HANDLE_T	power_handle;
-	unsigned char		power_state; /* enable/disable power state */
-	unsigned char		power_mode;  /* last set power mode */
 #ifdef CONFIG_MMC_SDHCI_BCM2708_DMA
 	unsigned char		dma_wanted;  /* DMA transfer requested */
 	unsigned char		dma_waits;   /* wait states in DMAs */
@@ -1044,7 +1035,6 @@ static ssize_t attr_status_show(struct device *_dev,
 
 	if (host) {
 		struct sdhci_bcm2708_priv *host_priv = SDHCI_HOST_PRIV(host);
-		int power_state = host_priv->power_state;
 		return sprintf(buf,
 			       "present: yes\n"
 			       "power: %s\n"
@@ -1054,10 +1044,7 @@ static ssize_t attr_status_show(struct device *_dev,
 #else
 			       "dma: unconfigured\n",
 #endif
-			       power_state == POWER_ON? "on":
-			       power_state == POWER_OFF? "off":
-			       power_state == POWER_LAZY_OFF? "lazy-off":
-			       "<unknown>",
+			       "always on",
 			       host->clock
 #ifdef CONFIG_MMC_SDHCI_BCM2708_DMA
 			       , (host->flags & SDHCI_USE_PLATDMA)? "on": "off"
@@ -1105,110 +1092,6 @@ static int sdhci_bcm2708_resume(struct platform_device *dev)
 }
 #endif
 
-
-/* Click forwards one step towards fully on */
-static int sdhci_bcm2708_enable(struct sdhci_host *host)
-{
-	int rc;
-	struct sdhci_bcm2708_priv *host_priv = SDHCI_HOST_PRIV(host);
-
-	if (host_priv->power_state == POWER_OFF) {
-		/* warning: may schedule - don't call in irq mode */
-		rc = bcm_power_request(host_priv->power_handle,
-				       BCM_POWER_SDCARD);
-
-		if (rc == 0) {
-			mmc_power_restore_host(host->mmc);
-			host_priv->power_state = POWER_ON;
-		} else if (rc != -EINTR)
-			printk(KERN_ERR "%s: mmc power up request failed - "
-			       "rc %d\n",
-			       mmc_hostname(host->mmc), rc);
-	} else {
-		host_priv->power_state = POWER_ON;
-		rc = 0;
-	}
-
-	return rc;
-}
-
-/* Click backwards one step towards fully off */
-static int sdhci_bcm2708_disable(struct sdhci_host *host, int lazy)
-{
-	int rc;
-	struct sdhci_bcm2708_priv *host_priv = SDHCI_HOST_PRIV(host);
-
-	if ((host_priv->power_state == POWER_ON) && lazy) {
-		host_priv->power_state = POWER_LAZY_OFF;
-		return BCM2708_SDHCI_SLEEP_TIMEOUT;
-	}
-
-	/* warning: may schedule - don't call in irq mode */
-	rc = bcm_power_request(host_priv->power_handle, BCM_POWER_NONE);
-
-	if (rc == 0)
-		host_priv->power_state = POWER_OFF;
-	else if (rc != -EINTR)
-		printk(KERN_ERR "%s: mmc power down request failed - rc %d\n",
-		       mmc_hostname(host->mmc), rc);
-
-	return rc;
-}
-
-static int sdhci_bcm2708_set_plat_power(struct sdhci_host *host,
-					int power_mode)
-{
-	struct sdhci_bcm2708_priv *host_priv = SDHCI_HOST_PRIV(host);
-	int rc;
-
-	do {
-		rc = mmc_host_enable(host->mmc);
-	} while (-EINTR == rc);
-
-	if (rc == 0) do {
-		if (rc == 0 && power_mode != host_priv->power_mode)
-		{
-			switch (power_mode)
-			{
-			case MMC_POWER_OFF:
-				rc = bcm_power_request(host_priv->power_handle,
-						       BCM_POWER_NONE);
-				break;
-
-			case MMC_POWER_UP:
-				rc = bcm_power_request(host_priv->power_handle,
-						       BCM_POWER_SDCARD);
-				/*
-				 * We need an extra 10ms delay of 10ms before we
-				 * can apply clock after applying power
-				 */
-				if (rc == 0)
-				    mdelay(10);
-				break;
-
-			case MMC_POWER_ON:
-				mdelay(10);
-				/* do_send_init_stream = 1; */
-				break;
-			}
-
-			if (rc == 0)
-			    host_priv->power_mode = power_mode;
-		}
-	} while (-EINTR == rc);
-
-	if (rc == 0) do {
-		if (rc == 0) {
-			if (power_mode == MMC_POWER_OFF)
-				rc = mmc_host_disable(host->mmc);
-			else
-				rc = mmc_host_lazy_disable(host->mmc);
-		}
-
-	} while (-EINTR == rc);
-
-	return rc;
-}
 
 /*****************************************************************************\
  *                                                                           *
@@ -1260,10 +1143,6 @@ static struct sdhci_ops sdhci_bcm2708_ops = {
 #endif
 	.get_max_clock = sdhci_bcm2708_get_max_clock,
 
-	.enable = sdhci_bcm2708_enable,
-	.disable = sdhci_bcm2708_disable,
-	.set_plat_power = sdhci_bcm2708_set_plat_power,
-
 #ifdef CONFIG_MMC_SDHCI_BCM2708_DMA
 	// Platform DMA operations
 	.pdma_able  = sdhci_bcm2708_platdma_dmaable,
@@ -1281,7 +1160,7 @@ static struct sdhci_ops sdhci_bcm2708_ops = {
  *									     *
 \*****************************************************************************/
 
-static int __devinit sdhci_bcm2708_probe(struct platform_device *pdev)
+static int sdhci_bcm2708_probe(struct platform_device *pdev)
 {
 	struct sdhci_host *host;
 	struct resource *iomem;
@@ -1354,11 +1233,6 @@ static int __devinit sdhci_bcm2708_probe(struct platform_device *pdev)
 	}
 
 	host_priv = SDHCI_HOST_PRIV(host);
-
-	host_priv->power_state = POWER_ON;
-	ret = bcm_power_open(&host_priv->power_handle);
-	if (ret != 0)
-		goto err_power;
 
 #ifdef CONFIG_MMC_SDHCI_BCM2708_DMA
 	host_priv->dma_wanted = 0;
@@ -1441,8 +1315,6 @@ err_add_dma:
 			      host_priv->cb_handle);
 err_alloc_cb:
 #endif
-	bcm_power_close(host_priv->power_handle);
-err_power:
 	iounmap(host->ioaddr);
 err_remap:
 	release_mem_region(iomem->start, resource_size(iomem));
@@ -1453,7 +1325,7 @@ err:
 	return ret;
 }
 
-static int __devexit sdhci_bcm2708_remove(struct platform_device *pdev)
+static int sdhci_bcm2708_remove(struct platform_device *pdev)
 {
 	struct sdhci_host *host = platform_get_drvdata(pdev);
 	struct resource *iomem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -1475,7 +1347,6 @@ static int __devexit sdhci_bcm2708_remove(struct platform_device *pdev)
 	dma_free_writecombine(&pdev->dev, SZ_4K, host_priv->cb_base,
 			      host_priv->cb_handle);
 #endif
-	bcm_power_close(host_priv->power_handle);
 	sdhci_remove_host(host, dead);
 	iounmap(host->ioaddr);
 	release_mem_region(iomem->start, resource_size(iomem));
@@ -1491,7 +1362,7 @@ static struct platform_driver sdhci_bcm2708_driver = {
 		.owner	= THIS_MODULE,
 	},
 	.probe		= sdhci_bcm2708_probe,
-	.remove		= __devexit_p(sdhci_bcm2708_remove),
+	.remove		= sdhci_bcm2708_remove,
 
 #ifdef CONFIG_PM
 	.suspend = sdhci_bcm2708_suspend,
