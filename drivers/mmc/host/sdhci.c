@@ -28,8 +28,8 @@
 #include <linux/mmc/mmc.h>
 #include <linux/mmc/host.h>
 #include <linux/mmc/card.h>
-#include <linux/mmc/slot-gpio.h>
 #include <linux/mmc/sd.h>
+#include <linux/mmc/slot-gpio.h>
 
 #include "sdhci.h"
 
@@ -128,6 +128,7 @@ static int sdhci_locked=0;
 void sdhci_spin_lock(struct sdhci_host *host)
 {
 	spin_lock(&host->lock);
+#ifdef CONFIG_PREEMPT
 	if(enable_llm)
 	{
 		disable_irq_nosync(host->irq);
@@ -135,22 +136,26 @@ void sdhci_spin_lock(struct sdhci_host *host)
 			disable_irq_nosync(host->second_irq);
 		local_irq_enable();
 	}
+#endif
 }
 
 void sdhci_spin_unlock(struct sdhci_host *host)
 {
+#ifdef CONFIG_PREEMPT
 	if(enable_llm)
 	{
 		local_irq_disable();
-		enable_irq(host->irq);
 		if(host->second_irq)
 			enable_irq(host->second_irq);
+		enable_irq(host->irq);
 	}
+#endif
 	spin_unlock(&host->lock);
 }
 
 void sdhci_spin_lock_irqsave(struct sdhci_host *host,unsigned long *flags)
 {
+#ifdef CONFIG_PREEMPT
 	if(enable_llm)
 	{
 		while(sdhci_locked)
@@ -164,37 +169,44 @@ void sdhci_spin_lock_irqsave(struct sdhci_host *host,unsigned long *flags)
 		local_irq_enable();
 	}
 	else
+#endif
 		spin_lock_irqsave(&host->lock,*flags);
 }
 
 void sdhci_spin_unlock_irqrestore(struct sdhci_host *host,unsigned long flags)
 {
+#ifdef CONFIG_PREEMPT
 	if(enable_llm)
 	{
 		local_irq_disable();
-		enable_irq(host->irq);
 		if(host->second_irq)
 			enable_irq(host->second_irq);
+		enable_irq(host->irq);
 	}
+#endif
 	spin_unlock_irqrestore(&host->lock,flags);
 }
 
 static void sdhci_spin_enable_schedule(struct sdhci_host *host)
 {
+#ifdef CONFIG_PREEMPT
 	if(enable_llm)
 	{
 		sdhci_locked = 1;
 		preempt_enable();
 	}
+#endif
 }
 
 static void sdhci_spin_disable_schedule(struct sdhci_host *host)
 {
+#ifdef CONFIG_PREEMPT
 	if(enable_llm)
 	{
 		preempt_disable();
 		sdhci_locked = 0;
 	}
+#endif
 }
 
 static void sdhci_clear_set_irqs(struct sdhci_host *host, u32 clear, u32 set)
@@ -280,9 +292,7 @@ static void sdhci_reset(struct sdhci_host *host, u8 mask)
 			return;
 		}
 		timeout--;
-		sdhci_spin_enable_schedule(host);
 		mdelay(1);
-		sdhci_spin_disable_schedule(host);
 	}
 
 	if (host->ops->platform_reset_exit)
@@ -924,11 +934,11 @@ static void sdhci_prepare_data(struct sdhci_host *host, struct mmc_command *cmd)
 		ctrl = sdhci_readb(host, SDHCI_HOST_CONTROL);
 		ctrl &= ~SDHCI_CTRL_DMA_MASK;
 		if (! (host->flags & SDHCI_USE_PLATDMA)) {
-			if ((host->flags & SDHCI_REQ_USE_DMA) &&
-				(host->flags & SDHCI_USE_ADMA))
-				ctrl |= SDHCI_CTRL_ADMA32;
-			else
-				ctrl |= SDHCI_CTRL_SDMA;
+		if ((host->flags & SDHCI_REQ_USE_DMA) &&
+			(host->flags & SDHCI_USE_ADMA))
+			ctrl |= SDHCI_CTRL_ADMA32;
+		else
+			ctrl |= SDHCI_CTRL_SDMA;
 		}
 		sdhci_writeb(host, ctrl, SDHCI_HOST_CONTROL);
 	}
@@ -1342,35 +1352,6 @@ static int sdhci_set_power(struct sdhci_host *host, unsigned short power)
 	return power;
 }
 
-/* Power on or off the circuitary supporting the register set */
-static int sdhci_set_plat_power(struct sdhci_host *host, int power_mode)
-{
-	if (host->ops->set_plat_power)
-		return host->ops->set_plat_power(host, power_mode);
-	else
-		return 0;
-}
-
-/* Click forwards one step towards fully on */
-static int sdhci_enable(struct mmc_host *mmc)
-{
-	struct sdhci_host *host;
-
-	host = mmc_priv(mmc);
-
-	return host->ops->enable? host->ops->enable(host): 0;
-}
-
-/* Click backwards one step towards fully off */
-static int sdhci_disable(struct mmc_host *mmc, int lazy)
-{
-	struct sdhci_host *host;
-
-	host = mmc_priv(mmc);
-
-	return host->ops->disable? host->ops->disable(host, lazy): 0;
-}
-
 /*****************************************************************************\
  *                                                                           *
  * MMC callbacks                                                             *
@@ -1467,7 +1448,6 @@ static void sdhci_do_set_ios(struct sdhci_host *host, struct mmc_ios *ios)
 	unsigned long flags;
 	int vdd_bit = -1;
 	u8 ctrl;
-	int rc;
 
 	sdhci_spin_lock_irqsave(host, &flags);
 
@@ -1545,8 +1525,7 @@ static void sdhci_do_set_ios(struct sdhci_host *host, struct mmc_ios *ios)
 		    (ios->timing == MMC_TIMING_UHS_SDR50) ||
 		    (ios->timing == MMC_TIMING_UHS_SDR104) ||
 		    (ios->timing == MMC_TIMING_UHS_DDR50) ||
-		    (ios->timing == MMC_TIMING_UHS_SDR25) ||
-		    (ios->timing == MMC_TIMING_UHS_SDR12))
+		    (ios->timing == MMC_TIMING_UHS_SDR25))
 			ctrl |= SDHCI_CTRL_HISPD;
 
 		ctrl_2 = sdhci_readw(host, SDHCI_HOST_CONTROL2);
@@ -1628,12 +1607,6 @@ static void sdhci_do_set_ios(struct sdhci_host *host, struct mmc_ios *ios)
 
 	mmiowb();
 	sdhci_spin_unlock_irqrestore(host, flags);
-
-	if (ios->power_mode == MMC_POWER_OFF) {
-		do 
-			rc = sdhci_set_plat_power(host, ios->power_mode);
-		while (rc == -EINTR);
-	}
 }
 
 static void sdhci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
@@ -2251,7 +2224,7 @@ static void sdhci_timeout_timer(unsigned long data)
 
 	if (host->mrq) {
 		pr_err("%s: Timeout waiting for hardware "
-				"interrupt - cmd%d.\n", mmc_hostname(host->mmc), host->last_cmdop);
+			"interrupt - cmd%d.\n", mmc_hostname(host->mmc), host->last_cmdop);
 		sdhci_dumpregs(host);
 
 		if (host->data) {
@@ -2297,10 +2270,10 @@ static void sdhci_cmd_irq(struct sdhci_host *host, u32 intmask)
 
 	if (!host->cmd) {
 		if (!(host->ops->extra_ints)) {
-			pr_err("%s: Got command interrupt 0x%08x even "
-				"though no command operation was in progress.\n",
-				mmc_hostname(host->mmc), (unsigned)intmask);
-			sdhci_dumpregs(host);
+		pr_err("%s: Got command interrupt 0x%08x even "
+			"though no command operation was in progress.\n",
+			mmc_hostname(host->mmc), (unsigned)intmask);
+		sdhci_dumpregs(host);
 		} else
 			DBG("cmd irq 0x%08x cmd complete\n", (unsigned)intmask);
 		return;
@@ -2413,12 +2386,12 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 				return;
 			}
 		}
-		
+
 		if (!(host->ops->extra_ints)) {
-			pr_err("%s: Got data interrupt 0x%08x even "
-				"though no data operation was in progress.\n",
-				mmc_hostname(host->mmc), (unsigned)intmask);
-			sdhci_dumpregs(host);
+		pr_err("%s: Got data interrupt 0x%08x even "
+			"though no data operation was in progress.\n",
+			mmc_hostname(host->mmc), (unsigned)intmask);
+		sdhci_dumpregs(host);
 		} else
 			DBG("data irq 0x%08x but no data\n", (unsigned)intmask);
 
@@ -2434,7 +2407,7 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 			DBG("ignoring spurious data_end_bit error\n");
 			intmask = SDHCI_INT_DATA_AVAIL|SDHCI_INT_DATA_END;
 		} else
-			host->data->error = -EILSEQ;
+		host->data->error = -EILSEQ;
 	} else if ((intmask & SDHCI_INT_DATA_CRC) &&
 		SDHCI_GET_CMD(sdhci_readw(host, SDHCI_COMMAND))
 			!= MMC_BUS_TEST_R) {
@@ -2444,7 +2417,7 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 			DBG("ignoring spurious data_crc_bit error\n");
 			intmask = SDHCI_INT_DATA_AVAIL|SDHCI_INT_DATA_END;
 		} else {
-			host->data->error = -EILSEQ;
+		host->data->error = -EILSEQ;
 		}
 	} else if (intmask & SDHCI_INT_ADMA_ERROR) {
 		pr_err("%s: ADMA error\n", mmc_hostname(host->mmc));
@@ -2675,12 +2648,6 @@ EXPORT_SYMBOL_GPL(sdhci_suspend_host);
 int sdhci_resume_host(struct sdhci_host *host)
 {
 	int ret;
-
-	if (host->vmmc) {
-		int ret = regulator_enable(host->vmmc);
-		if (ret)
-			return ret;
-	}
 
 	if (host->flags & (SDHCI_USE_SDMA | SDHCI_USE_ADMA | 
 			   SDHCI_USE_PLATDMA)) {
@@ -3021,7 +2988,7 @@ int sdhci_add_host(struct sdhci_host *host)
 	/* Auto-CMD23 stuff only works in ADMA or PIO. */
 	if ((host->version >= SDHCI_SPEC_300) &&
 	    ((host->flags & SDHCI_USE_ADMA) ||
-	     !(host->flags & SDHCI_USE_SDMA) )) {
+	     !(host->flags & SDHCI_USE_SDMA))) {
 		host->flags |= SDHCI_AUTO_CMD23;
 		DBG("%s: Auto-CMD23 available\n", mmc_hostname(mmc));
 	} else {
@@ -3191,7 +3158,7 @@ int sdhci_add_host(struct sdhci_host *host)
 
 	if(host->ops->voltage_broken) {
 		ocr_avail |= MMC_VDD_32_33 | MMC_VDD_33_34;
-		// Cannot support UHS modes is we are stuck at 3.3V;
+		// Cannot support UHS modes if we are stuck at 3.3V;
 		mmc->caps &= ~(MMC_CAP_UHS_SDR12 | MMC_CAP_UHS_SDR25 | MMC_CAP_UHS_SDR104 | MMC_CAP_UHS_SDR50 | MMC_CAP_UHS_DDR50);
 	}
 
