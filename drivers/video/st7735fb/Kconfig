@@ -1,0 +1,78 @@
+config FB_ST7735
+        tristate "ST7735 LCD panel framebuffer support"
+        depends on FB && SPI && GPIOLIB
+        default n
+        select FB_SYS_FILLRECT
+        select FB_SYS_COPYAREA
+        select FB_SYS_IMAGEBLIT
+        select FB_DEFERRED_IO
+        select FB_SYS_FOPS
+        help
+          Support for ST7735 framebuffer device family,
+          including 1.8" TFT LCD modules available from
+          Adafruit, SainSmart, and other manufacturers.
+
+config FB_ST7735_PANEL_TYPE_RED_TAB
+       bool "ST7735 'red tab' panel type?"
+       depends on FB_ST7735
+       default y
+       help
+         Different versions of the ST7735 1.8" panel are
+         indicated by the color of the tab on the removable
+         protective film.
+         Choose "y" for a "red tab" ST7735 panel.
+         Choose "n" for a "green tab" ST7735 panel.
+
+config FB_ST7735_RGB_ORDER_REVERSED
+       bool "ST7735 panel has reversed RGB?"
+       depends on FB_ST7735
+       default n
+       help
+         Some ST7735 1.8" panels are internally wired with
+         reversed RGB color channel ordering (BGR vs. RGB).
+         Choose "y" if the red and blue channels are inverted.
+         Otherwise choose "n".
+
+config FB_ST7735_MAP
+        tristate "ST7735 framebuffer mapping to GPIO/SPI"
+        depends on FB_ST7735
+        default FB_ST7735
+        help
+          Include support for an ST7735FB display on selected
+          SPI bus and GPIO pins.
+
+config FB_ST7735_MAP_RST_GPIO
+       int "ST7735 RST gpio pin number"
+       depends on FB_ST7735_MAP
+       default "-1"
+       help
+         Enter the gpio pin number wired to the ST7735 RST pin
+         (or leave -1 and set "st7735fb_map.rst_gpio=pinnum")
+
+config FB_ST7735_MAP_DC_GPIO
+       int "ST7735 D/C gpio pin number"
+       depends on FB_ST7735_MAP
+       default "-1"
+       help
+         Enter the gpio pin number wired to the ST7735 D/C pin
+         (or leave -1 and set "st7735fb_map.dc_gpio=pinnum")
+
+config FB_ST7735_MAP_SPI_BUS_NUM
+       int "ST7735 SPI bus number"
+       depends on FB_ST7735_MAP
+       default "0"
+
+config FB_ST7735_MAP_SPI_BUS_CS
+       int "ST7735 SPI bus chipselect"
+       depends on FB_ST7735_MAP
+       default "0"
+
+config FB_ST7735_MAP_SPI_BUS_SPEED
+       int "ST7735 SPI bus clock speed (Hz)"
+       depends on FB_ST7735_MAP
+       default "4000000"
+
+config FB_ST7735_MAP_SPI_BUS_MODE
+       int "ST7735 SPI bus mode (0, 1, 2, or 3)"
+       depends on FB_ST7735_MAP
+       default "0"
