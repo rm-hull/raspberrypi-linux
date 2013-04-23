@@ -148,12 +148,12 @@ static struct st7735_function st7735_cfg_script[] = {
 };
 
 static struct fb_fix_screeninfo st7735fb_fix __devinitdata = {
-	.id =		"ST7735", 
+	.id =		"ST7735",
 	.type =		FB_TYPE_PACKED_PIXELS,
 	.visual =	FB_VISUAL_TRUECOLOR,
 	.xpanstep =	0,
 	.ypanstep =	0,
-	.ywrapstep =	0, 
+	.ywrapstep =	0,
 	.line_length =	WIDTH*BPP/8,
 	.accel =	FB_ACCEL_NONE,
 };
@@ -492,7 +492,7 @@ void st7735fb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 	st7735fb_deferred_io_touch(info, rect);
 }
 
-void st7735fb_copyarea(struct fb_info *info, const struct fb_copyarea *area) 
+void st7735fb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 {
 	const struct fb_fillrect *rect = (const struct fb_fillrect *)area;
 
@@ -504,7 +504,7 @@ void st7735fb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 	st7735fb_deferred_io_touch(info, rect);
 }
 
-void st7735fb_imageblit(struct fb_info *info, const struct fb_image *image) 
+void st7735fb_imageblit(struct fb_info *info, const struct fb_image *image)
 {
 	const struct fb_fillrect *rect = (const struct fb_fillrect *)image;
 
@@ -691,9 +691,7 @@ static int __devinit st7735fb_probe (struct spi_device *spi)
 	if (retval < 0)
 		goto fbreg_fail;
 
-	pr_info("fb%d: %s frame buffer device,\n"
-		"\tusing %d KiB of video memory\n"
-		"\trst_gpio=%d dc_gpio=%d\n",
+	pr_info("fb%d: %s frame buffer device, using %d KiB of video memory [rst_gpio=%d dc_gpio=%d]\n",
 		info->node, info->fix.id, vmem_size, par->rst, par->dc);
 
 	return 0;
@@ -726,7 +724,7 @@ static int __devexit st7735fb_remove(struct spi_device *spi)
 		struct st7735fb_par *par = info->par;
 		unregister_framebuffer(info);
 		fb_deferred_io_cleanup(info);
-		vfree(info->screen_base);	
+		vfree(info->screen_base);
 		framebuffer_release(info);
 		vfree(par->spi_writebuf);
 		gpio_free(par->dc);
