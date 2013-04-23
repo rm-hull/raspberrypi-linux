@@ -46,9 +46,9 @@ static unsigned int remap_irqs[(INTERRUPT_ARASANSDIO + 1) - INTERRUPT_JPEG] = {
 static void armctrl_mask_irq(struct irq_data *d)
 {
 	static const unsigned int disables[4] = {
-		IO_ADDRESS(ARM_IRQ_DIBL1),
-		IO_ADDRESS(ARM_IRQ_DIBL2),
-		IO_ADDRESS(ARM_IRQ_DIBL3),
+		ARM_IRQ_DIBL1,
+		ARM_IRQ_DIBL2,
+		ARM_IRQ_DIBL3,
 		0
 	};
 
@@ -56,16 +56,16 @@ static void armctrl_mask_irq(struct irq_data *d)
 		writel(0, __io_address(ARM_IRQ_FAST));
 	} else {
 		unsigned int data = (unsigned int)irq_get_chip_data(d->irq);
-		writel(1 << (data & 0x1f), __io(disables[(data >> 5) & 0x3]));
+		writel(1 << (data & 0x1f), __io_address(disables[(data >> 5) & 0x3]));
 	}
 }
 
 static void armctrl_unmask_irq(struct irq_data *d)
 {
 	static const unsigned int enables[4] = {
-		IO_ADDRESS(ARM_IRQ_ENBL1),
-		IO_ADDRESS(ARM_IRQ_ENBL2),
-		IO_ADDRESS(ARM_IRQ_ENBL3),
+		ARM_IRQ_ENBL1,
+		ARM_IRQ_ENBL2,
+		ARM_IRQ_ENBL3,
 		0
 	};
 
@@ -75,7 +75,7 @@ static void armctrl_unmask_irq(struct irq_data *d)
 		writel(0x80 | data, __io_address(ARM_IRQ_FAST));
 	} else {
 		unsigned int data = (unsigned int)irq_get_chip_data(d->irq);
-		writel(1 << (data & 0x1f), __io(enables[(data >> 5) & 0x3]));
+		writel(1 << (data & 0x1f), __io_address(enables[(data >> 5) & 0x3]));
 	}
 }
 

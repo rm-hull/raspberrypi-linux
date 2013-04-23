@@ -46,7 +46,7 @@
 #include "dwc_otg_hcd.h"
 #include "dwc_otg_regs.h"
 
-extern bool microframe_schedule;
+extern bool microframe_schedule, nak_holdoff_enable;
 
 //#define DEBUG_HOST_CHANNELS
 #ifdef DEBUG_HOST_CHANNELS
@@ -442,7 +442,7 @@ void dwc_otg_hcd_stop(dwc_otg_hcd_t * hcd)
 	hprt0_data_t hprt0 = {.d32 = 0 };
 
 	DWC_DEBUGPL(DBG_HCD, "DWC OTG HCD STOP\n");
- 
+
 	/*
 	 * The root hub should be disconnected before this function is called.
 	 * The disconnect will clear the QTD lists (via ..._hcd_urb_dequeue)
@@ -538,17 +538,17 @@ int dwc_otg_hcd_urb_dequeue(dwc_otg_hcd_t * hcd,
 		DWC_ERROR("**** DWC OTG HCD URB Dequeue has NULL HCD\n");
 		return -DWC_E_INVALID;
 	}
-	if (dwc_otg_urb == NULL) { 
+	if (dwc_otg_urb == NULL) {
 		DWC_ERROR("**** DWC OTG HCD URB Dequeue has NULL URB\n");
 		return -DWC_E_INVALID;
 	}
-	if (dwc_otg_urb->qtd == NULL) { 
+	if (dwc_otg_urb->qtd == NULL) {
 		DWC_ERROR("**** DWC OTG HCD URB Dequeue with NULL QTD\n");
 		return -DWC_E_INVALID;
 	}
 	urb_qtd = dwc_otg_urb->qtd;
 	BUG_ON(!urb_qtd);
-	if (urb_qtd->qh == NULL) { 
+	if (urb_qtd->qh == NULL) {
 		DWC_ERROR("**** DWC OTG HCD URB Dequeue with QTD with NULL Q handler\n");
 		return -DWC_E_INVALID;
 	}
@@ -733,8 +733,8 @@ static void qh_list_free(dwc_otg_hcd_t * hcd, dwc_list_link_t * qh_list)
 		return;
 	}
 	/*
-	 * Hold spinlock here. Not needed in that case if bellow 
-	 * function is being called from ISR 
+	 * Hold spinlock here. Not needed in that case if bellow
+	 * function is being called from ISR
 	 */
 	DWC_SPINLOCK_IRQSAVE(hcd->lock, &flags);
 	/* Ensure there are no QTDs or URBs left. */
@@ -953,7 +953,7 @@ int dwc_otg_hcd_init(dwc_otg_hcd_t * hcd, dwc_otg_core_if_t * core_if)
 		hcd->core_if->pwron_timer = DWC_TIMER_ALLOC("PWRON TIMER",
 									dwc_otg_hcd_power_up, core_if);
 	}
-#endif	
+#endif
 
 	/*
 	 * Allocate space for storing data on status transactions. Normally no
@@ -1051,7 +1051,7 @@ static void assign_and_init_hc(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 	void* ptr = NULL;
 
 	qtd = DWC_CIRCLEQ_FIRST(&qh->qtd_list);
-	
+
 	urb = qtd->urb;
 
 	DWC_DEBUGPL(DBG_HCDV, "%s(%p,%p) - urb %x, actual_length %d\n", __func__, hcd, qh, (unsigned int)urb, urb->actual_length);
@@ -1228,12 +1228,12 @@ static void assign_and_init_hc(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 		}
 		break;
 	}
-	/* non DWORD-aligned buffer case */	
+	/* non DWORD-aligned buffer case */
 	if (ptr) {
 		uint32_t buf_size;
 		if (hc->ep_type != DWC_OTG_EP_TYPE_ISOC) {
 			buf_size = hcd->core_if->core_params->max_transfer_size;
-		} else {				
+		} else {
 			buf_size = 4096;
 		}
 		if (!qh->dw_align_buf) {
@@ -1349,18 +1349,26 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 
 		/*
 		 * Check to see if this is a NAK'd retransmit, in which case ignore for retransmission
-		 * we hold off on bulk retransmissions to reduce NAK interrupt overhead for
+		 * we hold off on bulk retransmissions to reduce NAK interrupt overhead for full-speed
 		 * cheeky devices that just hold off using NAKs
 		 */
-		if (dwc_full_frame_num(qh->nak_frame) == dwc_full_frame_num(dwc_otg_hcd_get_frame_number(hcd))) {
-			// Make fiq interrupt run on next frame (i.e. 8 uframes)
-			g_next_sched_frame = ((qh->nak_frame + 8) & ~7) & DWC_HFNUM_MAX_FRNUM;
-			qh_ptr = DWC_LIST_NEXT(qh_ptr);
-			continue;
+		if (nak_holdoff_enable && qh->do_split) {
+			if (qh->nak_frame != 0xffff &&
+				dwc_full_frame_num(qh->nak_frame) ==
+				dwc_full_frame_num(dwc_otg_hcd_get_frame_number(hcd))) {
+				/*
+				 * Revisit: Need to avoid trampling on periodic scheduling.
+				 * Currently we are safe because g_np_count != g_np_sent whenever we hit this,
+				 * but if this behaviour is changed then periodic endpoints will get a slower
+				 * polling rate.
+				 */
+				g_next_sched_frame = ((qh->nak_frame + 8) & ~7) & DWC_HFNUM_MAX_FRNUM;
+				qh_ptr = DWC_LIST_NEXT(qh_ptr);
+				continue;
+			} else {
+				qh->nak_frame = 0xffff;
+			}
 		}
-		else
-			qh->nak_frame = 0xffff;
-
 		if (microframe_schedule) {
 				DWC_SPINLOCK_IRQSAVE(channel_lock, &flags);
 				if (hcd->available_host_channels < 1) {
@@ -2429,9 +2437,9 @@ int dwc_otg_hcd_hub_control(dwc_otg_hcd_t * dwc_otg_hcd,
 			port_status |= (1 << UHF_PORT_L1);
 		}
 		/*
-		   For Synopsys HW emulation of Power down wkup_control asserts the 
-		   hreset_n and prst_n on suspned. This causes the HPRT0 to be zero. 
-		   We intentionally tell the software that port is in L2Suspend state. 
+		   For Synopsys HW emulation of Power down wkup_control asserts the
+		   hreset_n and prst_n on suspned. This causes the HPRT0 to be zero.
+		   We intentionally tell the software that port is in L2Suspend state.
 		   Only for STE.
 		*/
 		if ((core_if->power_down == 2)
@@ -2541,7 +2549,7 @@ int dwc_otg_hcd_hub_control(dwc_otg_hcd_t * dwc_otg_hcd,
 					DWC_MODIFY_REG32(core_if->pcgcctl, 0, pcgcctl.d32);
 					dwc_udelay(10);
 				}
-#ifdef DWC_DEV_SRPCAP				
+#ifdef DWC_DEV_SRPCAP
 				gpwrdn.d32 = 0;
 				gpwrdn.b.dis_vbus = 1;
 				DWC_MODIFY_REG32(&core_if->core_global_regs->
@@ -3117,7 +3125,7 @@ int dwc_otg_hcd_start(dwc_otg_hcd_t * hcd,
 	int retval = 0;
 
 	hcd->fops = fops;
-	if (!dwc_otg_is_device_mode(hcd->core_if) && 
+	if (!dwc_otg_is_device_mode(hcd->core_if) &&
 		(!hcd->core_if->adp_enable || hcd->core_if->adp.adp_started)) {
 		dwc_otg_hcd_reinit(hcd);
 	} else {
@@ -3344,11 +3352,11 @@ void dwc_otg_hcd_dump_state(dwc_otg_hcd_t * hcd)
 		if (hc->xfer_started && hc->qh) {
 			dwc_otg_qtd_t *qtd;
 			dwc_otg_hcd_urb_t *urb;
-			
+
 			DWC_CIRCLEQ_FOREACH(qtd, &hc->qh->qtd_list, qtd_list_entry) {
 				if (!qtd->in_process)
 					break;
-				
+
 				urb = qtd->urb;
 			DWC_PRINTF("    URB Info:\n");
 			DWC_PRINTF("      qtd: %p, urb: %p\n", qtd, urb);
