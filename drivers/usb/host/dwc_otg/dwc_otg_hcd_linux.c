@@ -129,10 +129,10 @@ static struct hc_driver dwc_otg_hc_driver = {
 
 	.flags = HCD_MEMORY | HCD_USB2,
 
-	//.reset =
+	//.reset =              
 	.start = hcd_start,
-	//.suspend =
-	//.resume =
+	//.suspend =            
+	//.resume =             
 	.stop = hcd_stop,
 
 	.urb_enqueue = dwc_otg_urb_enqueue,
@@ -145,8 +145,8 @@ static struct hc_driver dwc_otg_hc_driver = {
 
 	.hub_status_data = hub_status_data,
 	.hub_control = hub_control,
-	//.bus_suspend =
-	//.bus_resume =
+	//.bus_suspend =                
+	//.bus_resume =         
 };
 
 /** Gets the dwc_otg_hcd from a struct usb_hcd */
@@ -407,7 +407,7 @@ int hcd_init(dwc_bus_dev_t *_dev)
                 dmamask = DMA_BIT_MASK(32);
         else
                 dmamask = 0;
-
+              
 #if    defined(LM_INTERFACE) || defined(PLATFORM_INTERFACE)
         dma_set_mask(&_dev->dev, dmamask);
         dma_set_coherent_mask(&_dev->dev, dmamask);
@@ -497,7 +497,7 @@ int hcd_init(dwc_bus_dev_t *_dev)
 #ifdef PLATFORM_INTERFACE
         retval = usb_add_hcd(hcd, platform_get_irq(_dev, 0), IRQF_SHARED | IRQF_DISABLED);
 #else
-        retval = usb_add_hcd(hcd, _dev->irq, IRQF_SHARED | IRQF_DISABLED);
+        retval = usb_add_hcd(hcd, _dev->irq, IRQF_SHARED | IRQF_DISABLED);	
 #endif
 	if (retval < 0) {
 		goto error2;
@@ -716,7 +716,7 @@ static int dwc_otg_urb_enqueue(struct usb_hcd *hcd,
         urb->hcpriv = dwc_otg_urb;
         if (!dwc_otg_urb && urb->number_of_packets)
                 return -ENOMEM;
-
+        
 	dwc_otg_hcd_urb_set_pipeinfo(dwc_otg_urb, usb_pipedevice(urb->pipe),
 				     usb_pipeendpoint(urb->pipe), ep_type,
 				     usb_pipein(urb->pipe),
@@ -759,12 +759,12 @@ static int dwc_otg_urb_enqueue(struct usb_hcd *hcd,
         DWC_SPINLOCK_IRQSAVE(dwc_otg_hcd->lock, &irqflags);
 	retval = usb_hcd_link_urb_to_ep(hcd, urb);
         DWC_SPINUNLOCK_IRQRESTORE(dwc_otg_hcd->lock, irqflags);
-	if (0 == retval)
+	if (0 == retval) 
 #endif
         {
                 retval = dwc_otg_hcd_urb_enqueue(dwc_otg_hcd, dwc_otg_urb,
                                                  /*(dwc_otg_qh_t **)*/
-                                                 ref_ep_hcpriv,
+                                                 ref_ep_hcpriv, 
                                                  mem_flags == GFP_ATOMIC ? 1 : 0);
                 if (0 == retval) {
                         if (alloc_bandwidth) {
@@ -844,7 +844,7 @@ static int dwc_otg_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
                 DWC_DEBUGPL(DBG_HCD, "DWC OTG HCD URB Dequeue failed - rc %d\n",
                             rc);
         }
-
+           
 	return rc;
 }
 
@@ -864,7 +864,7 @@ static void endpoint_disable(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
-/* Resets endpoint specific parameter values, in current version used to reset
+/* Resets endpoint specific parameter values, in current version used to reset 
  * the data toggle(as a WA). This function can be called from usb_clear_halt routine */
 static void endpoint_reset(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
 {
