@@ -420,7 +420,7 @@ int hcd_init(dwc_bus_dev_t *_dev)
 	{
 		// Set up fiq
 		claim_fiq(&fh);
-		set_fiq_handler(__FIQ_Branch, 8);
+		set_fiq_handler(__FIQ_Branch, 4);
 		memset(&regs,0,sizeof(regs));
 		regs.ARM_r8 = (long)dwc_otg_hcd_handle_fiq;
 		regs.ARM_r9 = (long)0;

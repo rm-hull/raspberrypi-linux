@@ -362,7 +362,7 @@ static struct resource bcm2708_usb_resources[] = {
 	       },
 };
 
-bool fiq_fix_enable = false;
+bool fiq_fix_enable = true;
 
 static struct resource bcm2708_usb_resources_no_fiq_fix[] = {
 	[0] = {
@@ -668,13 +668,13 @@ static void bcm2708_restart(char mode, const char *cmd)
 	uint32_t timeout = 10;
 
 	/* Setup watchdog for reset */
-	pm_rstc = readl(IO_ADDRESS(PM_RSTC));
+	pm_rstc = readl(__io_address(PM_RSTC));
 
 	pm_wdog = PM_PASSWORD | (timeout & PM_WDOG_TIME_SET); // watchdog timer = timer clock / 16; need password (31:16) + value (11:0)
 	pm_rstc = PM_PASSWORD | (pm_rstc & PM_RSTC_WRCFG_CLR) | PM_RSTC_WRCFG_FULL_RESET;
 
-	writel(pm_wdog, IO_ADDRESS(PM_WDOG));
-	writel(pm_rstc, IO_ADDRESS(PM_RSTC));
+	writel(pm_wdog, __io_address(PM_WDOG));
+	writel(pm_rstc, __io_address(PM_RSTC));
 }
 
 /* We can't really power off, but if we do the normal reset scheme, and indicate to bootcode.bin not to reboot, then most of the chip will be powered off */
