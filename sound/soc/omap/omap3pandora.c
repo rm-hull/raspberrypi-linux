@@ -31,7 +31,7 @@
 #include <sound/soc.h>
 
 #include <asm/mach-types.h>
-#include <plat/mcbsp.h>
+#include <linux/platform_data/asoc-ti-mcbsp.h>
 
 #include "omap-mcbsp.h"
 #include "omap-pcm.h"
@@ -144,11 +144,11 @@ static const struct snd_soc_dapm_route omap3pandora_in_map[] = {
 	{"AUXL", NULL, "Line In"},
 	{"AUXR", NULL, "Line In"},
 
-	{"MAINMIC", NULL, "Mic Bias 1"},
-	{"Mic Bias 1", NULL, "Mic (internal)"},
+	{"MAINMIC", NULL, "Mic (internal)"},
+	{"Mic (internal)", NULL, "Mic Bias 1"},
 
-	{"SUBMIC", NULL, "Mic Bias 2"},
-	{"Mic Bias 2", NULL, "Mic (external)"},
+	{"SUBMIC", NULL, "Mic (external)"},
+	{"Mic (external)", NULL, "Mic Bias 2"},
 };
 
 static int omap3pandora_out_init(struct snd_soc_pcm_runtime *rtd)
@@ -208,7 +208,7 @@ static struct snd_soc_dai_link omap3pandora_dai[] = {
 	{
 		.name = "PCM1773",
 		.stream_name = "HiFi Out",
-		.cpu_dai_name = "omap-mcbsp-dai.1",
+		.cpu_dai_name = "omap-mcbsp.2",
 		.codec_dai_name = "twl4030-hifi",
 		.platform_name = "omap-pcm-audio",
 		.codec_name = "twl4030-codec",
@@ -219,7 +219,7 @@ static struct snd_soc_dai_link omap3pandora_dai[] = {
 	}, {
 		.name = "TWL4030",
 		.stream_name = "Line/Mic In",
-		.cpu_dai_name = "omap-mcbsp-dai.3",
+		.cpu_dai_name = "omap-mcbsp.4",
 		.codec_dai_name = "twl4030-hifi",
 		.platform_name = "omap-pcm-audio",
 		.codec_name = "twl4030-codec",
@@ -233,6 +233,7 @@ static struct snd_soc_dai_link omap3pandora_dai[] = {
 /* SoC card */
 static struct snd_soc_card snd_soc_card_omap3pandora = {
 	.name = "omap3pandora",
+	.owner = THIS_MODULE,
 	.dai_link = omap3pandora_dai,
 	.num_links = ARRAY_SIZE(omap3pandora_dai),
 };

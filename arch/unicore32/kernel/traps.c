@@ -26,7 +26,6 @@
 #include <linux/unistd.h>
 
 #include <asm/cacheflush.h>
-#include <asm/system.h>
 #include <asm/traps.h>
 
 #include "setup.h"
@@ -232,7 +231,7 @@ void die(const char *str, struct pt_regs *regs, int err)
 	ret = __die(str, err, thread, regs);
 
 	bust_spinlocks(0);
-	add_taint(TAINT_DIE);
+	add_taint(TAINT_DIE, LOCKDEP_NOW_UNRELIABLE);
 	spin_unlock_irq(&die_lock);
 	oops_exit();
 

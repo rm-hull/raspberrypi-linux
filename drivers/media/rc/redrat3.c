@@ -195,9 +195,6 @@ struct redrat3_dev {
 	dma_addr_t dma_in;
 	dma_addr_t dma_out;
 
-	/* locks this structure */
-	struct mutex lock;
-
 	/* rx signal timeout timer */
 	struct timer_list rx_timeout;
 	u32 hw_timeout;
@@ -285,12 +282,6 @@ static void redrat3_issue_async(struct redrat3_dev *rr3)
 	int res;
 
 	rr3_ftr(rr3->dev, "Entering %s\n", __func__);
-
-	if (!rr3->det_enabled) {
-		dev_warn(rr3->dev, "not issuing async read, "
-			 "detector not enabled\n");
-		return;
-	}
 
 	memset(rr3->bulk_in_buf, 0, rr3->ep_in->wMaxPacketSize);
 	res = usb_submit_urb(rr3->read_urb, GFP_ATOMIC);
@@ -827,6 +818,7 @@ out:
 static void redrat3_handle_async(struct urb *urb, struct pt_regs *regs)
 {
 	struct redrat3_dev *rr3;
+	int ret;
 
 	if (!urb)
 		return;
@@ -840,15 +832,13 @@ static void redrat3_handle_async(struct urb *urb, struct pt_regs *regs)
 
 	rr3_ftr(rr3->dev, "Entering %s\n", __func__);
 
-	if (!rr3->det_enabled) {
-		rr3_dbg(rr3->dev, "received a read callback but detector "
-			"disabled - ignoring\n");
-		return;
-	}
-
 	switch (urb->status) {
 	case 0:
-		redrat3_get_ir_data(rr3, urb->actual_length);
+		ret = redrat3_get_ir_data(rr3, urb->actual_length);
+		if (!ret) {
+			/* no error, prepare to read more */
+			redrat3_issue_async(rr3);
+		}
 		break;
 
 	case -ECONNRESET:
@@ -865,11 +855,6 @@ static void redrat3_handle_async(struct urb *urb, struct pt_regs *regs)
 		rr3->pkttype = 0;
 		break;
 	}
-
-	if (!rr3->transmitting)
-		redrat3_issue_async(rr3);
-	else
-		rr3_dbg(rr3->dev, "IR transmit in progress\n");
 }
 
 static void redrat3_write_bulk_callback(struct urb *urb, struct pt_regs *regs)
@@ -896,21 +881,27 @@ static u16 mod_freq_to_val(unsigned int mod_freq)
 	return (u16)(65536 - (mult / mod_freq));
 }
 
-static int redrat3_set_tx_carrier(struct rc_dev *dev, u32 carrier)
+static int redrat3_set_tx_carrier(struct rc_dev *rcdev, u32 carrier)
 {
-	struct redrat3_dev *rr3 = dev->priv;
+	struct redrat3_dev *rr3 = rcdev->priv;
+	struct device *dev = rr3->dev;
+
+	rr3_dbg(dev, "Setting modulation frequency to %u", carrier);
+	if (carrier == 0)
+		return -EINVAL;
 
 	rr3->carrier = carrier;
 
 	return carrier;
 }
 
-static int redrat3_transmit_ir(struct rc_dev *rcdev, int *txbuf, u32 n)
+static int redrat3_transmit_ir(struct rc_dev *rcdev, unsigned *txbuf,
+				unsigned count)
 {
 	struct redrat3_dev *rr3 = rcdev->priv;
 	struct device *dev = rr3->dev;
 	struct redrat3_signal_header header;
-	int i, j, count, ret, ret_len, offset;
+	int i, j, ret, ret_len, offset;
 	int lencheck, cur_sample_len, pipe;
 	char *buffer = NULL, *sigdata = NULL;
 	int *sample_lens = NULL;
@@ -928,19 +919,11 @@ static int redrat3_transmit_ir(struct rc_dev *rcdev, int *txbuf, u32 n)
 		return -EAGAIN;
 	}
 
-	count = n / sizeof(int);
-	if (count > (RR3_DRIVER_MAXLENS * 2))
-		return -EINVAL;
+	count = min_t(unsigned, count, RR3_MAX_SIG_SIZE - RR3_TX_TRAILER_LEN);
 
+	/* rr3 will disable rc detector on transmit */
+	rr3->det_enabled = false;
 	rr3->transmitting = true;
-
-	redrat3_disable_detector(rr3);
-
-	if (rr3->det_enabled) {
-		dev_err(dev, "%s: cannot tx while rx is enabled\n", __func__);
-		ret = -EIO;
-		goto out;
-	}
 
 	sample_lens = kzalloc(sizeof(int) * RR3_DRIVER_MAXLENS, GFP_KERNEL);
 	if (!sample_lens) {
@@ -949,24 +932,22 @@ static int redrat3_transmit_ir(struct rc_dev *rcdev, int *txbuf, u32 n)
 	}
 
 	for (i = 0; i < count; i++) {
+		cur_sample_len = redrat3_us_to_len(txbuf[i]);
 		for (lencheck = 0; lencheck < curlencheck; lencheck++) {
-			cur_sample_len = redrat3_us_to_len(txbuf[i]);
 			if (sample_lens[lencheck] == cur_sample_len)
 				break;
 		}
 		if (lencheck == curlencheck) {
-			cur_sample_len = redrat3_us_to_len(txbuf[i]);
 			rr3_dbg(dev, "txbuf[%d]=%u, pos %d, enc %u\n",
 				i, txbuf[i], curlencheck, cur_sample_len);
-			if (curlencheck < 255) {
+			if (curlencheck < RR3_DRIVER_MAXLENS) {
 				/* now convert the value to a proper
 				 * rr3 value.. */
 				sample_lens[curlencheck] = cur_sample_len;
 				curlencheck++;
 			} else {
-				dev_err(dev, "signal too long\n");
-				ret = -EINVAL;
-				goto out;
+				count = i - 1;
+				break;
 			}
 		}
 	}
@@ -1055,7 +1036,7 @@ static int redrat3_transmit_ir(struct rc_dev *rcdev, int *txbuf, u32 n)
 	if (ret < 0)
 		dev_err(dev, "Error: control msg send failed, rc %d\n", ret);
 	else
-		ret = n;
+		ret = count;
 
 out:
 	kfree(sample_lens);
@@ -1063,8 +1044,8 @@ out:
 	kfree(sigdata);
 
 	rr3->transmitting = false;
-
-	redrat3_enable_detector(rr3);
+	/* rr3 re-enables rc detector because it was enabled before */
+	rr3->det_enabled = true;
 
 	return ret;
 }
@@ -1095,11 +1076,12 @@ static struct rc_dev *redrat3_init_rc_dev(struct redrat3_dev *rr3)
 	rc->dev.parent = dev;
 	rc->priv = rr3;
 	rc->driver_type = RC_DRIVER_IR_RAW;
-	rc->allowed_protos = RC_TYPE_ALL;
+	rc->allowed_protos = RC_BIT_ALL;
 	rc->timeout = US_TO_NS(2750);
 	rc->tx_ir = redrat3_transmit_ir;
 	rc->s_tx_carrier = redrat3_set_tx_carrier;
 	rc->driver_name = DRIVER_NAME;
+	rc->rx_resolution = US_TO_NS(2);
 	rc->map_name = RC_MAP_HAUPPAUGE;
 
 	ret = rc_register_device(rc);
@@ -1115,8 +1097,8 @@ out:
 	return NULL;
 }
 
-static int __devinit redrat3_dev_probe(struct usb_interface *intf,
-				       const struct usb_device_id *id)
+static int redrat3_dev_probe(struct usb_interface *intf,
+			     const struct usb_device_id *id)
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
 	struct device *dev = &intf->dev;
@@ -1215,7 +1197,6 @@ static int __devinit redrat3_dev_probe(struct usb_interface *intf,
 			  rr3->bulk_out_buf, ep_out->wMaxPacketSize,
 			  (usb_complete_t)redrat3_write_bulk_callback, rr3);
 
-	mutex_init(&rr3->lock);
 	rr3->udev = udev;
 
 	redrat3_reset(rr3);
@@ -1233,9 +1214,10 @@ static int __devinit redrat3_dev_probe(struct usb_interface *intf,
 	rr3->carrier = 38000;
 
 	rr3->rc = redrat3_init_rc_dev(rr3);
-	if (!rr3->rc)
+	if (!rr3->rc) {
+		retval = -ENOMEM;
 		goto error;
-
+	}
 	setup_timer(&rr3->rx_timeout, redrat3_rx_timeout, (unsigned long)rr3);
 
 	/* we can register the device now, as it is ready */
@@ -1253,7 +1235,7 @@ no_endpoints:
 	return retval;
 }
 
-static void __devexit redrat3_dev_disconnect(struct usb_interface *intf)
+static void redrat3_dev_disconnect(struct usb_interface *intf)
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
 	struct redrat3_dev *rr3 = usb_get_intfdata(intf);

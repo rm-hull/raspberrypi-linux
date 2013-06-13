@@ -109,8 +109,8 @@
 
 #define UV_BAU_MESSAGE			0xf5
 
-/* Xen vector callback to receive events in a HVM domain */
-#define XEN_HVM_EVTCHN_CALLBACK		0xf3
+/* Vector on which hypervisor callbacks will be delivered */
+#define HYPERVISOR_CALLBACK_VECTOR	0xf3
 
 /*
  * Local APIC timer IRQ vector is on a different priority level,
@@ -118,17 +118,6 @@
  * sources per level' errata.
  */
 #define LOCAL_TIMER_VECTOR		0xef
-
-/* up to 32 vectors used for spreading out TLB flushes: */
-#if NR_CPUS <= 32
-# define NUM_INVALIDATE_TLB_VECTORS	(NR_CPUS)
-#else
-# define NUM_INVALIDATE_TLB_VECTORS	(32)
-#endif
-
-#define INVALIDATE_TLB_VECTOR_END	(0xee)
-#define INVALIDATE_TLB_VECTOR_START	\
-	(INVALIDATE_TLB_VECTOR_END-NUM_INVALIDATE_TLB_VECTORS+1)
 
 #define NR_VECTORS			 256
 

@@ -39,7 +39,6 @@
 #include <asm/atarihw.h>
 #include <asm/atariints.h>
 #include <asm/atari_stram.h>
-#include <asm/system.h>
 #include <asm/machdep.h>
 #include <asm/hwtest.h>
 #include <asm/io.h>
@@ -75,7 +74,7 @@ static void atari_heartbeat(int on);
 
 /* atari specific timer functions (in time.c) */
 extern void atari_sched_init(irq_handler_t);
-extern unsigned long atari_gettimeoffset (void);
+extern u32 atari_gettimeoffset(void);
 extern int atari_mste_hwclk (int, struct rtc_time *);
 extern int atari_tt_hwclk (int, struct rtc_time *);
 extern int atari_mste_set_clock_mmss (unsigned long);
@@ -205,7 +204,7 @@ void __init config_atari(void)
 	mach_init_IRQ        = atari_init_IRQ;
 	mach_get_model	 = atari_get_model;
 	mach_get_hardware_list = atari_get_hardware_list;
-	mach_gettimeoffset   = atari_gettimeoffset;
+	arch_gettimeoffset   = atari_gettimeoffset;
 	mach_reset           = atari_reset;
 	mach_max_dma_address = 0xffffff;
 #if defined(CONFIG_INPUT_M68K_BEEP) || defined(CONFIG_INPUT_M68K_BEEP_MODULE)
@@ -414,9 +413,9 @@ void __init config_atari(void)
 					 * FDC val = 4 -> Supervisor only */
 		asm volatile ("\n"
 			"	.chip	68030\n"
-			"	pmove	%0@,%/tt1\n"
+			"	pmove	%0,%/tt1\n"
 			"	.chip	68k"
-			: : "a" (&tt1_val));
+			: : "m" (tt1_val));
 	} else {
 	        asm volatile ("\n"
 			"	.chip	68040\n"
@@ -569,10 +568,10 @@ static void atari_reset(void)
 			: "d0");
 	} else
 		asm volatile ("\n"
-			"	pmove	%0@,%%tc\n"
+			"	pmove	%0,%%tc\n"
 			"	jmp	%1@"
 			: /* no outputs */
-			: "a" (&tc_val), "a" (reset_addr));
+			: "m" (tc_val), "a" (reset_addr));
 }
 
 

@@ -63,12 +63,6 @@ struct chip_data {
 };
 
 #ifdef CONFIG_DEBUG_FS
-static int spi_show_regs_open(struct inode *inode, struct file *file)
-{
-	file->private_data = inode->i_private;
-	return 0;
-}
-
 #define SPI_REGS_BUFSIZE	1024
 static ssize_t  spi_show_regs(struct file *file, char __user *user_buf,
 				size_t count, loff_t *ppos)
@@ -128,7 +122,7 @@ static ssize_t  spi_show_regs(struct file *file, char __user *user_buf,
 
 static const struct file_operations mrst_spi_regs_ops = {
 	.owner		= THIS_MODULE,
-	.open		= spi_show_regs_open,
+	.open		= simple_open,
 	.read		= spi_show_regs,
 	.llseek		= default_llseek,
 };
@@ -702,7 +696,7 @@ static void dw_spi_cleanup(struct spi_device *spi)
 	kfree(chip);
 }
 
-static int __devinit init_queue(struct dw_spi *dws)
+static int init_queue(struct dw_spi *dws)
 {
 	INIT_LIST_HEAD(&dws->queue);
 	spin_lock_init(&dws->lock);
@@ -801,7 +795,7 @@ static void spi_hw_init(struct dw_spi *dws)
 	}
 }
 
-int __devinit dw_spi_add_host(struct dw_spi *dws)
+int dw_spi_add_host(struct dw_spi *dws)
 {
 	struct spi_master *master;
 	int ret;
@@ -883,7 +877,7 @@ exit:
 }
 EXPORT_SYMBOL_GPL(dw_spi_add_host);
 
-void __devexit dw_spi_remove_host(struct dw_spi *dws)
+void dw_spi_remove_host(struct dw_spi *dws)
 {
 	int status = 0;
 

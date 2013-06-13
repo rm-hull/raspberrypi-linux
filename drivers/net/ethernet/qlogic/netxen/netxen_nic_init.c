@@ -144,7 +144,7 @@ void netxen_release_tx_buffers(struct netxen_adapter *adapter)
 					 buffrag->length, PCI_DMA_TODEVICE);
 			buffrag->dma = 0ULL;
 		}
-		for (j = 0; j < cmd_buf->frag_count; j++) {
+		for (j = 1; j < cmd_buf->frag_count; j++) {
 			buffrag++;
 			if (buffrag->dma) {
 				pci_unmap_page(adapter->pdev, buffrag->dma,
@@ -197,41 +197,33 @@ int netxen_alloc_sw_resources(struct netxen_adapter *adapter)
 	struct nx_host_sds_ring *sds_ring;
 	struct nx_host_tx_ring *tx_ring;
 	struct netxen_rx_buffer *rx_buf;
-	int ring, i, size;
+	int ring, i;
 
 	struct netxen_cmd_buffer *cmd_buf_arr;
 	struct net_device *netdev = adapter->netdev;
-	struct pci_dev *pdev = adapter->pdev;
 
-	size = sizeof(struct nx_host_tx_ring);
-	tx_ring = kzalloc(size, GFP_KERNEL);
-	if (tx_ring == NULL) {
-		dev_err(&pdev->dev, "%s: failed to allocate tx ring struct\n",
-		       netdev->name);
+	tx_ring = kzalloc(sizeof(struct nx_host_tx_ring), GFP_KERNEL);
+	if (tx_ring == NULL)
 		return -ENOMEM;
-	}
+
 	adapter->tx_ring = tx_ring;
 
 	tx_ring->num_desc = adapter->num_txd;
 	tx_ring->txq = netdev_get_tx_queue(netdev, 0);
 
 	cmd_buf_arr = vzalloc(TX_BUFF_RINGSIZE(tx_ring));
-	if (cmd_buf_arr == NULL) {
-		dev_err(&pdev->dev, "%s: failed to allocate cmd buffer ring\n",
-		       netdev->name);
+	if (cmd_buf_arr == NULL)
 		goto err_out;
-	}
+
 	tx_ring->cmd_buf_arr = cmd_buf_arr;
 
 	recv_ctx = &adapter->recv_ctx;
 
-	size = adapter->max_rds_rings * sizeof (struct nx_host_rds_ring);
-	rds_ring = kzalloc(size, GFP_KERNEL);
-	if (rds_ring == NULL) {
-		dev_err(&pdev->dev, "%s: failed to allocate rds ring struct\n",
-		       netdev->name);
+	rds_ring = kcalloc(adapter->max_rds_rings,
+			   sizeof(struct nx_host_rds_ring), GFP_KERNEL);
+	if (rds_ring == NULL)
 		goto err_out;
-	}
+
 	recv_ctx->rds_rings = rds_ring;
 
 	for (ring = 0; ring < adapter->max_rds_rings; ring++) {
@@ -280,13 +272,10 @@ int netxen_alloc_sw_resources(struct netxen_adapter *adapter)
 
 		}
 		rds_ring->rx_buf_arr = vzalloc(RCV_BUFF_RINGSIZE(rds_ring));
-		if (rds_ring->rx_buf_arr == NULL) {
-			printk(KERN_ERR "%s: Failed to allocate "
-				"rx buffer ring %d\n",
-				netdev->name, ring);
+		if (rds_ring->rx_buf_arr == NULL)
 			/* free whatever was already allocated */
 			goto err_out;
-		}
+
 		INIT_LIST_HEAD(&rds_ring->free_list);
 		/*
 		 * Now go through all of them, set reference handles
@@ -449,7 +438,7 @@ int netxen_pinit_from_rom(struct netxen_adapter *adapter)
 
 	/* resetall */
 	netxen_rom_lock(adapter);
-	NXWR32(adapter, NETXEN_ROMUSB_GLB_SW_RESET, 0xffffffff);
+	NXWR32(adapter, NETXEN_ROMUSB_GLB_SW_RESET, 0xfeffffff);
 	netxen_rom_unlock(adapter);
 
 	if (NX_IS_REVISION_P3(adapter->ahw.revision_id)) {
@@ -480,11 +469,8 @@ int netxen_pinit_from_rom(struct netxen_adapter *adapter)
 	}
 
 	buf = kcalloc(n, sizeof(struct crb_addr_pair), GFP_KERNEL);
-	if (buf == NULL) {
-		printk("%s: netxen_pinit_from_rom: Unable to calloc memory.\n",
-				netxen_nic_driver_name);
+	if (buf == NULL)
 		return -ENOMEM;
-	}
 
 	for (i = 0; i < n; i++) {
 		if (netxen_rom_fast_read(adapter, 8*i + 4*offset, &val) != 0 ||
@@ -1137,7 +1123,6 @@ netxen_validate_firmware(struct netxen_adapter *adapter)
 		 _build(file_fw_ver));
 		return -EINVAL;
 	}
-
 	val = nx_get_bios_version(adapter);
 	netxen_rom_fast_read(adapter, NX_BIOS_VERSION_OFFSET, (int *)&bios);
 	if ((__force u32)val != bios) {
@@ -1267,8 +1252,7 @@ next:
 void
 netxen_release_firmware(struct netxen_adapter *adapter)
 {
-	if (adapter->fw)
-		release_firmware(adapter->fw);
+	release_firmware(adapter->fw);
 	adapter->fw = NULL;
 }
 
@@ -1353,7 +1337,6 @@ int netxen_phantom_init(struct netxen_adapter *adapter, int pegtune_val)
 
 	do {
 		val = NXRD32(adapter, CRB_CMDPEG_STATE);
-
 		switch (val) {
 		case PHAN_INITIALIZE_COMPLETE:
 		case PHAN_INITIALIZE_ACK:
@@ -1446,8 +1429,6 @@ netxen_handle_linkevent(struct netxen_adapter *adapter, nx_fw_msg_t *msg)
 				netdev->name, cable_len);
 	}
 
-	netxen_advert_link_change(adapter, link_status);
-
 	/* update link parameters */
 	if (duplex == LINKEVENT_FULL_DUPLEX)
 		adapter->link_duplex = DUPLEX_FULL;
@@ -1456,6 +1437,8 @@ netxen_handle_linkevent(struct netxen_adapter *adapter, nx_fw_msg_t *msg)
 	adapter->module_type = module;
 	adapter->link_autoneg = autoneg;
 	adapter->link_speed = link_speed;
+
+	netxen_advert_link_change(adapter, link_status);
 }
 
 static void
@@ -1494,7 +1477,7 @@ netxen_alloc_rx_skb(struct netxen_adapter *adapter,
 	dma_addr_t dma;
 	struct pci_dev *pdev = adapter->pdev;
 
-	buffer->skb = dev_alloc_skb(rds_ring->skb_size);
+	buffer->skb = netdev_alloc_skb(adapter->netdev, rds_ring->skb_size);
 	if (!buffer->skb)
 		return 1;
 
@@ -1540,8 +1523,6 @@ static struct sk_buff *netxen_process_rxbuf(struct netxen_adapter *adapter,
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
 	} else
 		skb->ip_summed = CHECKSUM_NONE;
-
-	skb->dev = adapter->netdev;
 
 	buffer->skb = NULL;
 no_skb:
@@ -1667,6 +1648,9 @@ netxen_process_lro(struct netxen_adapter *adapter,
 	th->seq = htonl(seq_number);
 
 	length = skb->len;
+
+	if (adapter->flags & NETXEN_FW_MSS_CAP)
+		skb_shinfo(skb)->gso_size  =  netxen_get_lro_sts_mss(sts_data1);
 
 	netif_receive_skb(skb);
 

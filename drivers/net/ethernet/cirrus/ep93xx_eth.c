@@ -282,7 +282,7 @@ static int ep93xx_rx(struct net_device *dev, int processed, int budget)
 		if (rstat0 & RSTAT0_CRCI)
 			length -= 4;
 
-		skb = dev_alloc_skb(length + 2);
+		skb = netdev_alloc_skb(dev, length + 2);
 		if (likely(skb != NULL)) {
 			struct ep93xx_rdesc *rxd = &ep->descs->rdesc[entry];
 			skb_reserve(skb, 2);
@@ -710,8 +710,8 @@ static int ep93xx_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 
 static void ep93xx_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
 {
-	strcpy(info->driver, DRV_MODULE_NAME);
-	strcpy(info->version, DRV_MODULE_VERSION);
+	strlcpy(info->driver, DRV_MODULE_NAME, sizeof(info->driver));
+	strlcpy(info->version, DRV_MODULE_VERSION, sizeof(info->version));
 }
 
 static int ep93xx_get_settings(struct net_device *dev, struct ethtool_cmd *cmd)
@@ -859,7 +859,7 @@ static int ep93xx_eth_probe(struct platform_device *pdev)
 	ep->mdc_divisor = 40;	/* Max HCLK 100 MHz, min MDIO clk 2.5 MHz.  */
 
 	if (is_zero_ether_addr(dev->dev_addr))
-		random_ether_addr(dev->dev_addr);
+		eth_hw_addr_random(dev);
 
 	err = register_netdev(dev);
 	if (err) {

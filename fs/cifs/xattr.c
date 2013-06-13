@@ -39,7 +39,7 @@ int cifs_removexattr(struct dentry *direntry, const char *ea_name)
 {
 	int rc = -EOPNOTSUPP;
 #ifdef CONFIG_CIFS_XATTR
-	int xid;
+	unsigned int xid;
 	struct cifs_sb_info *cifs_sb;
 	struct tcon_link *tlink;
 	struct cifs_tcon *pTcon;
@@ -60,7 +60,7 @@ int cifs_removexattr(struct dentry *direntry, const char *ea_name)
 		return PTR_ERR(tlink);
 	pTcon = tlink_tcon(tlink);
 
-	xid = GetXid();
+	xid = get_xid();
 
 	full_path = build_path_from_dentry(direntry);
 	if (full_path == NULL) {
@@ -88,7 +88,7 @@ int cifs_removexattr(struct dentry *direntry, const char *ea_name)
 	}
 remove_ea_exit:
 	kfree(full_path);
-	FreeXid(xid);
+	free_xid(xid);
 	cifs_put_tlink(tlink);
 #endif
 	return rc;
@@ -99,13 +99,12 @@ int cifs_setxattr(struct dentry *direntry, const char *ea_name,
 {
 	int rc = -EOPNOTSUPP;
 #ifdef CONFIG_CIFS_XATTR
-	int xid;
+	unsigned int xid;
 	struct cifs_sb_info *cifs_sb;
 	struct tcon_link *tlink;
 	struct cifs_tcon *pTcon;
 	struct super_block *sb;
 	char *full_path;
-	struct cifs_ntsd *pacl;
 
 	if (direntry == NULL)
 		return -EIO;
@@ -121,7 +120,7 @@ int cifs_setxattr(struct dentry *direntry, const char *ea_name,
 		return PTR_ERR(tlink);
 	pTcon = tlink_tcon(tlink);
 
-	xid = GetXid();
+	xid = get_xid();
 
 	full_path = build_path_from_dentry(direntry);
 	if (full_path == NULL) {
@@ -164,23 +163,24 @@ int cifs_setxattr(struct dentry *direntry, const char *ea_name,
 			cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MAP_SPECIAL_CHR);
 	} else if (strncmp(ea_name, CIFS_XATTR_CIFS_ACL,
 			strlen(CIFS_XATTR_CIFS_ACL)) == 0) {
+#ifdef CONFIG_CIFS_ACL
+		struct cifs_ntsd *pacl;
 		pacl = kmalloc(value_size, GFP_KERNEL);
 		if (!pacl) {
 			cFYI(1, "%s: Can't allocate memory for ACL",
 					__func__);
 			rc = -ENOMEM;
 		} else {
-#ifdef CONFIG_CIFS_ACL
 			memcpy(pacl, ea_value, value_size);
 			rc = set_cifs_acl(pacl, value_size,
 				direntry->d_inode, full_path, CIFS_ACL_DACL);
 			if (rc == 0) /* force revalidate of the inode */
 				CIFS_I(direntry->d_inode)->time = 0;
 			kfree(pacl);
+		}
 #else
 			cFYI(1, "Set CIFS ACL not supported yet");
 #endif /* CONFIG_CIFS_ACL */
-		}
 	} else {
 		int temp;
 		temp = strncmp(ea_name, POSIX_ACL_XATTR_ACCESS,
@@ -221,7 +221,7 @@ int cifs_setxattr(struct dentry *direntry, const char *ea_name,
 
 set_ea_exit:
 	kfree(full_path);
-	FreeXid(xid);
+	free_xid(xid);
 	cifs_put_tlink(tlink);
 #endif
 	return rc;
@@ -232,7 +232,7 @@ ssize_t cifs_getxattr(struct dentry *direntry, const char *ea_name,
 {
 	ssize_t rc = -EOPNOTSUPP;
 #ifdef CONFIG_CIFS_XATTR
-	int xid;
+	unsigned int xid;
 	struct cifs_sb_info *cifs_sb;
 	struct tcon_link *tlink;
 	struct cifs_tcon *pTcon;
@@ -253,7 +253,7 @@ ssize_t cifs_getxattr(struct dentry *direntry, const char *ea_name,
 		return PTR_ERR(tlink);
 	pTcon = tlink_tcon(tlink);
 
-	xid = GetXid();
+	xid = get_xid();
 
 	full_path = build_path_from_dentry(direntry);
 	if (full_path == NULL) {
@@ -355,7 +355,7 @@ ssize_t cifs_getxattr(struct dentry *direntry, const char *ea_name,
 
 get_ea_exit:
 	kfree(full_path);
-	FreeXid(xid);
+	free_xid(xid);
 	cifs_put_tlink(tlink);
 #endif
 	return rc;
@@ -365,7 +365,7 @@ ssize_t cifs_listxattr(struct dentry *direntry, char *data, size_t buf_size)
 {
 	ssize_t rc = -EOPNOTSUPP;
 #ifdef CONFIG_CIFS_XATTR
-	int xid;
+	unsigned int xid;
 	struct cifs_sb_info *cifs_sb;
 	struct tcon_link *tlink;
 	struct cifs_tcon *pTcon;
@@ -389,7 +389,7 @@ ssize_t cifs_listxattr(struct dentry *direntry, char *data, size_t buf_size)
 		return PTR_ERR(tlink);
 	pTcon = tlink_tcon(tlink);
 
-	xid = GetXid();
+	xid = get_xid();
 
 	full_path = build_path_from_dentry(direntry);
 	if (full_path == NULL) {
@@ -409,7 +409,7 @@ ssize_t cifs_listxattr(struct dentry *direntry, char *data, size_t buf_size)
 
 list_ea_exit:
 	kfree(full_path);
-	FreeXid(xid);
+	free_xid(xid);
 	cifs_put_tlink(tlink);
 #endif
 	return rc;

@@ -1,5 +1,5 @@
 /*
- * drivers/net/ibm_newemac/tah.c
+ * drivers/net/ethernet/ibm/emac/tah.c
  *
  * Driver for PowerPC 4xx on-chip ethernet controller, TAH support.
  *
@@ -23,7 +23,7 @@
 #include "emac.h"
 #include "core.h"
 
-int __devinit tah_attach(struct platform_device *ofdev, int channel)
+int tah_attach(struct platform_device *ofdev, int channel)
 {
 	struct tah_instance *dev = dev_get_drvdata(&ofdev->dev);
 
@@ -87,7 +87,7 @@ void *tah_dump_regs(struct platform_device *ofdev, void *buf)
 	return regs + 1;
 }
 
-static int __devinit tah_probe(struct platform_device *ofdev)
+static int tah_probe(struct platform_device *ofdev)
 {
 	struct device_node *np = ofdev->dev.of_node;
 	struct tah_instance *dev;
@@ -96,11 +96,8 @@ static int __devinit tah_probe(struct platform_device *ofdev)
 
 	rc = -ENOMEM;
 	dev = kzalloc(sizeof(struct tah_instance), GFP_KERNEL);
-	if (dev == NULL) {
-		printk(KERN_ERR "%s: could not allocate TAH device!\n",
-		       np->full_name);
+	if (dev == NULL)
 		goto err_gone;
-	}
 
 	mutex_init(&dev->lock);
 	dev->ofdev = ofdev;
@@ -138,7 +135,7 @@ static int __devinit tah_probe(struct platform_device *ofdev)
 	return rc;
 }
 
-static int __devexit tah_remove(struct platform_device *ofdev)
+static int tah_remove(struct platform_device *ofdev)
 {
 	struct tah_instance *dev = dev_get_drvdata(&ofdev->dev);
 

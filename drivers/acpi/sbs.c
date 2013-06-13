@@ -130,7 +130,7 @@ struct acpi_sbs {
 
 #define to_acpi_sbs(x) container_of(x, struct acpi_sbs, charger)
 
-static int acpi_sbs_remove(struct acpi_device *device, int type);
+static int acpi_sbs_remove(struct acpi_device *device);
 static int acpi_battery_get_state(struct acpi_battery *battery);
 
 static inline int battery_scale(int log)
@@ -949,11 +949,11 @@ static int acpi_sbs_add(struct acpi_device *device)
 	acpi_smbus_register_callback(sbs->hc, acpi_sbs_callback, sbs);
       end:
 	if (result)
-		acpi_sbs_remove(device, 0);
+		acpi_sbs_remove(device);
 	return result;
 }
 
-static int acpi_sbs_remove(struct acpi_device *device, int type)
+static int acpi_sbs_remove(struct acpi_device *device)
 {
 	struct acpi_sbs *sbs;
 	int id;
@@ -988,15 +988,19 @@ static void acpi_sbs_rmdirs(void)
 #endif
 }
 
-static int acpi_sbs_resume(struct acpi_device *device)
+#ifdef CONFIG_PM_SLEEP
+static int acpi_sbs_resume(struct device *dev)
 {
 	struct acpi_sbs *sbs;
-	if (!device)
+	if (!dev)
 		return -EINVAL;
-	sbs = device->driver_data;
+	sbs = to_acpi_device(dev)->driver_data;
 	acpi_sbs_callback(sbs);
 	return 0;
 }
+#endif
+
+static SIMPLE_DEV_PM_OPS(acpi_sbs_pm, NULL, acpi_sbs_resume);
 
 static struct acpi_driver acpi_sbs_driver = {
 	.name = "sbs",
@@ -1005,8 +1009,8 @@ static struct acpi_driver acpi_sbs_driver = {
 	.ops = {
 		.add = acpi_sbs_add,
 		.remove = acpi_sbs_remove,
-		.resume = acpi_sbs_resume,
 		},
+	.drv.pm = &acpi_sbs_pm,
 };
 
 static int __init acpi_sbs_init(void)

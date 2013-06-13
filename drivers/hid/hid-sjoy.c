@@ -155,7 +155,8 @@ err:
 }
 
 static const struct hid_device_id sjoy_devices[] = {
-	{ HID_USB_DEVICE(USB_VENDOR_ID_WISEGROUP_LTD, USB_DEVICE_ID_SUPER_JOY_BOX_3_PRO) },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_WISEGROUP_LTD, USB_DEVICE_ID_SUPER_JOY_BOX_3_PRO),
+		.driver_data = HID_QUIRK_NOGET },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_WISEGROUP_LTD, USB_DEVICE_ID_SUPER_DUAL_BOX_PRO),
 		.driver_data = HID_QUIRK_MULTI_INPUT | HID_QUIRK_NOGET |
 			       HID_QUIRK_SKIP_OUTPUT_REPORTS },
@@ -163,8 +164,9 @@ static const struct hid_device_id sjoy_devices[] = {
 		.driver_data = HID_QUIRK_MULTI_INPUT | HID_QUIRK_NOGET |
 			       HID_QUIRK_SKIP_OUTPUT_REPORTS },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_WISEGROUP, USB_DEVICE_ID_SMARTJOY_PLUS) },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_WISEGROUP, USB_DEVICE_ID_SUPER_JOY_BOX_3) },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_WISEGROUP, USB_DEVICE_ID_DUAL_USB_JOYPAD),
-		.driver_data = HID_QUIRK_MULTI_INPUT | HID_QUIRK_NOGET |
+		.driver_data = HID_QUIRK_MULTI_INPUT |
 			       HID_QUIRK_SKIP_OUTPUT_REPORTS },
 	{ }
 };
@@ -175,19 +177,8 @@ static struct hid_driver sjoy_driver = {
 	.id_table = sjoy_devices,
 	.probe = sjoy_probe,
 };
+module_hid_driver(sjoy_driver);
 
-static int __init sjoy_init(void)
-{
-	return hid_register_driver(&sjoy_driver);
-}
-
-static void __exit sjoy_exit(void)
-{
-	hid_unregister_driver(&sjoy_driver);
-}
-
-module_init(sjoy_init);
-module_exit(sjoy_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jussi Kivilinna");
 

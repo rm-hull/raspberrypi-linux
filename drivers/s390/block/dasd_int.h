@@ -1,5 +1,4 @@
 /*
- * File...........: linux/drivers/s390/block/dasd_int.h
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  *		    Horst Hummel <Horst.Hummel@de.ibm.com>
  *		    Martin Schwidefsky <schwidefsky@de.ibm.com>
@@ -9,8 +8,6 @@
 
 #ifndef DASD_INT_H
 #define DASD_INT_H
-
-#ifdef __KERNEL__
 
 /* we keep old device allocation scheme; IOW, minors are still in 0..255 */
 #define DASD_PER_MAJOR (1U << (MINORBITS - DASD_PARTN_BITS))
@@ -355,6 +352,7 @@ struct dasd_discipline {
 	int (*reload) (struct dasd_device *);
 
 	int (*get_uid) (struct dasd_device *, struct dasd_uid *);
+	void (*kick_validate) (struct dasd_device *);
 };
 
 extern struct dasd_discipline *dasd_diag_discipline_pointer;
@@ -455,6 +453,7 @@ struct dasd_device {
 	struct work_struct kick_work;
 	struct work_struct restore_device;
 	struct work_struct reload_device;
+	struct work_struct kick_validate;
 	struct timer_list timer;
 
 	debug_info_t *debug_area;
@@ -517,6 +516,8 @@ struct dasd_block {
 #define DASD_FLAG_IS_RESERVED	7	/* The device is reserved */
 #define DASD_FLAG_LOCK_STOLEN	8	/* The device lock was stolen */
 #define DASD_FLAG_SUSPENDED	9	/* The device was suspended */
+#define DASD_FLAG_SAFE_OFFLINE	10	/* safe offline processing requested*/
+#define DASD_FLAG_SAFE_OFFLINE_RUNNING	11	/* safe offline running */
 
 
 void dasd_put_device_wake(struct dasd_device *);
@@ -686,6 +687,7 @@ int dasd_generic_set_offline (struct ccw_device *cdev);
 int dasd_generic_notify(struct ccw_device *, int);
 int dasd_generic_last_path_gone(struct dasd_device *);
 int dasd_generic_path_operational(struct dasd_device *);
+void dasd_generic_shutdown(struct ccw_device *);
 
 void dasd_generic_handle_state_change(struct dasd_device *);
 int dasd_generic_pm_freeze(struct ccw_device *);
@@ -788,7 +790,5 @@ static inline int dasd_eer_enabled(struct dasd_device *device)
 #define dasd_eer_snss(d)	do { } while (0)
 #define dasd_eer_enabled(d)	(0)
 #endif	/* CONFIG_DASD_ERR */
-
-#endif				/* __KERNEL__ */
 
 #endif				/* DASD_H */

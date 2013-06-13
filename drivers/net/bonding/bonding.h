@@ -21,6 +21,8 @@
 #include <linux/cpumask.h>
 #include <linux/in6.h>
 #include <linux/netpoll.h>
+#include <linux/inetdevice.h>
+#include <linux/etherdevice.h>
 #include "bond_3ad.h"
 #include "bond_alb.h"
 
@@ -166,7 +168,6 @@ struct bond_parm_tbl {
 
 struct vlan_entry {
 	struct list_head vlan_list;
-	__be32 vlan_ip;
 	unsigned short vlan_id;
 };
 
@@ -218,8 +219,8 @@ struct bonding {
 	struct   slave *primary_slave;
 	bool     force_primary;
 	s32      slave_cnt; /* never change this value outside the attach/detach wrappers */
-	void     (*recv_probe)(struct sk_buff *, struct bonding *,
-			       struct slave *);
+	int     (*recv_probe)(const struct sk_buff *, struct bonding *,
+			      struct slave *);
 	rwlock_t lock;
 	rwlock_t curr_slave_lock;
 	u8	 send_peer_notif;
@@ -232,7 +233,6 @@ struct bonding {
 	struct   list_head bond_list;
 	struct   netdev_hw_addr_list mc_list;
 	int      (*xmit_hash_policy)(struct sk_buff *, int);
-	__be32   master_ip;
 	u16      rr_tx_counter;
 	struct   ad_bond_info ad_info;
 	struct   alb_bond_info alb_info;
@@ -245,9 +245,10 @@ struct bonding {
 	struct   delayed_work ad_work;
 	struct   delayed_work mcast_work;
 #ifdef CONFIG_DEBUG_FS
-	/* debugging suport via debugfs */
+	/* debugging support via debugfs */
 	struct	 dentry *debug_dir;
 #endif /* CONFIG_DEBUG_FS */
+	bool	dev_addr_from_first;
 };
 
 static inline bool bond_vlan_used(struct bonding *bond)
@@ -257,6 +258,9 @@ static inline bool bond_vlan_used(struct bonding *bond)
 
 #define bond_slave_get_rcu(dev) \
 	((struct slave *) rcu_dereference(dev->rx_handler_data))
+
+#define bond_slave_get_rtnl(dev) \
+	((struct slave *) rtnl_dereference(dev->rx_handler_data))
 
 /**
  * Returns NULL if the net_device does not belong to any of the bond's slaves
@@ -280,11 +284,9 @@ static inline struct slave *bond_get_slave_by_dev(struct bonding *bond,
 
 static inline struct bonding *bond_get_bond_by_slave(struct slave *slave)
 {
-	if (!slave || !slave->dev->master) {
+	if (!slave || !slave->bond)
 		return NULL;
-	}
-
-	return netdev_priv(slave->dev->master);
+	return slave->bond;
 }
 
 static inline bool bond_is_lb(const struct bonding *bond)
@@ -360,10 +362,9 @@ static inline void bond_netpoll_send_skb(const struct slave *slave,
 
 static inline void bond_set_slave_inactive_flags(struct slave *slave)
 {
-	struct bonding *bond = netdev_priv(slave->dev->master);
-	if (!bond_is_lb(bond))
+	if (!bond_is_lb(slave->bond))
 		bond_set_backup_slave(slave);
-	if (!bond->params.all_slaves_active)
+	if (!slave->bond->params.all_slaves_active)
 		slave->inactive = 1;
 }
 
@@ -376,6 +377,21 @@ static inline void bond_set_slave_active_flags(struct slave *slave)
 static inline bool bond_is_slave_inactive(struct slave *slave)
 {
 	return slave->inactive;
+}
+
+static inline __be32 bond_confirm_addr(struct net_device *dev, __be32 dst, __be32 local)
+{
+	struct in_device *in_dev;
+	__be32 addr = 0;
+
+	rcu_read_lock();
+	in_dev = __in_dev_get_rcu(dev);
+
+	if (in_dev)
+		addr = inet_confirm_addr(in_dev, dst, local, RT_SCOPE_HOST);
+
+	rcu_read_unlock();
+	return addr;
 }
 
 struct bond_net;
@@ -436,6 +452,18 @@ static inline void bond_destroy_proc_dir(struct bond_net *bn)
 }
 #endif
 
+static inline struct slave *bond_slave_has_mac(struct bonding *bond,
+					       const u8 *mac)
+{
+	int i = 0;
+	struct slave *tmp;
+
+	bond_for_each_slave(bond, tmp, i)
+		if (ether_addr_equal_64bits(mac, tmp->dev->dev_addr))
+			return tmp;
+
+	return NULL;
+}
 
 /* exported from bond_main.c */
 extern int bond_net_id;

@@ -13,8 +13,10 @@
  */
 #include <linux/bug.h>
 #include <linux/compiler.h>
+#include <linux/kexec.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/smp.h>
@@ -45,7 +47,6 @@
 #include <asm/pgtable.h>
 #include <asm/ptrace.h>
 #include <asm/sections.h>
-#include <asm/system.h>
 #include <asm/tlbdebug.h>
 #include <asm/traps.h>
 #include <asm/uaccess.h>
@@ -91,7 +92,8 @@ int (*board_be_handler)(struct pt_regs *regs, int is_fixup);
 void (*board_nmi_handler_setup)(void);
 void (*board_ejtag_handler_setup)(void);
 void (*board_bind_eic_interrupt)(int irq, int regset);
-
+void (*board_ebase_setup)(void);
+void __cpuinitdata(*board_cache_error_setup)(void);
 
 static void show_raw_backtrace(unsigned long reg29)
 {
@@ -131,6 +133,9 @@ static void show_backtrace(struct task_struct *task, const struct pt_regs *regs)
 	unsigned long ra = regs->regs[31];
 	unsigned long pc = regs->cp0_epc;
 
+	if (!task)
+		task = current;
+
 	if (raw_show_trace || !__kernel_text_address(pc)) {
 		show_raw_backtrace(sp);
 		return;
@@ -159,7 +164,7 @@ static void show_stacktrace(struct task_struct *task,
 	i = 0;
 	while ((unsigned long) sp & (PAGE_SIZE - 1)) {
 		if (i && ((i % (64 / field)) == 0))
-			printk("\n       ");
+			printk("\n	 ");
 		if (i > 39) {
 			printk(" ...");
 			break;
@@ -274,7 +279,7 @@ static void __show_regs(const struct pt_regs *regs)
 	printk("ra    : %0*lx %pS\n", field, regs->regs[31],
 	       (void *) regs->regs[31]);
 
-	printk("Status: %08x    ", (uint32_t) regs->cp0_status);
+	printk("Status: %08x	", (uint32_t) regs->cp0_status);
 
 	if (current_cpu_data.isa_level == MIPS_CPU_ISA_I) {
 		if (regs->cp0_status & ST0_KUO)
@@ -391,7 +396,7 @@ void __noreturn die(const char *str, struct pt_regs *regs)
 
 	printk("%s[#%d]:\n", str, ++die_counter);
 	show_registers(regs);
-	add_taint(TAINT_DIE);
+	add_taint(TAINT_DIE, LOCKDEP_NOW_UNRELIABLE);
 	raw_spin_unlock_irq(&die_lock);
 
 	oops_exit();
@@ -400,10 +405,13 @@ void __noreturn die(const char *str, struct pt_regs *regs)
 		panic("Fatal exception in interrupt");
 
 	if (panic_on_oops) {
-		printk(KERN_EMERG "Fatal exception: panic in 5 seconds\n");
+		printk(KERN_EMERG "Fatal exception: panic in 5 seconds");
 		ssleep(5);
 		panic("Fatal exception");
 	}
+
+	if (regs && kexec_should_crash(current))
+		crash_kexec(regs);
 
 	do_exit(sig);
 }
@@ -433,7 +441,7 @@ asmlinkage void do_be(struct pt_regs *regs)
 	int data = regs->cp0_cause & 4;
 	int action = MIPS_BE_FATAL;
 
-	/* XXX For now.  Fixme, this searches the wrong table ...  */
+	/* XXX For now.	 Fixme, this searches the wrong table ...  */
 	if (data && !user_mode(regs))
 		fixup = search_dbe_tables(exception_epc(regs));
 
@@ -510,7 +518,7 @@ static inline int simulate_ll(struct pt_regs *regs, unsigned int opcode)
 	offset >>= 16;
 
 	vaddr = (unsigned long __user *)
-	        ((unsigned long)(regs->regs[(opcode & BASE) >> 21]) + offset);
+		((unsigned long)(regs->regs[(opcode & BASE) >> 21]) + offset);
 
 	if ((unsigned long)vaddr & 3)
 		return SIGBUS;
@@ -550,7 +558,7 @@ static inline int simulate_sc(struct pt_regs *regs, unsigned int opcode)
 	offset >>= 16;
 
 	vaddr = (unsigned long __user *)
-	        ((unsigned long)(regs->regs[(opcode & BASE) >> 21]) + offset);
+		((unsigned long)(regs->regs[(opcode & BASE) >> 21]) + offset);
 	reg = (opcode & RT) >> 16;
 
 	if ((unsigned long)vaddr & 3)
@@ -731,7 +739,7 @@ asmlinkage void do_fpe(struct pt_regs *regs, unsigned long fcr31)
 		current->thread.fpu.fcr31 &= ~FPU_CSR_ALL_X;
 
 		/* Restore the hardware register state */
-		own_fpu(1);	/* Using the FPU again.  */
+		own_fpu(1);	/* Using the FPU again.	 */
 
 		/* If something went wrong, signal */
 		process_fpemu_return(sig, fault_addr);
@@ -958,7 +966,7 @@ int cu2_notifier_call_chain(unsigned long val, void *v)
 }
 
 static int default_cu2_call(struct notifier_block *nfb, unsigned long action,
-        void *data)
+	void *data)
 {
 	struct pt_regs *regs = data;
 
@@ -966,7 +974,7 @@ static int default_cu2_call(struct notifier_block *nfb, unsigned long action,
 	default:
 		die_if_kernel("Unhandled kernel unaligned access or invalid "
 			      "instruction", regs);
-		/* Fall through  */
+		/* Fall through	 */
 
 	case CU2_EXCEPTION:
 		force_sig(SIGILL, current);
@@ -1017,10 +1025,28 @@ asmlinkage void do_cpu(struct pt_regs *regs)
 
 		return;
 
+	case 3:
+		/*
+		 * Old (MIPS I and MIPS II) processors will set this code
+		 * for COP1X opcode instructions that replaced the original
+		 * COP3 space.	We don't limit COP1 space instructions in
+		 * the emulator according to the CPU ISA, so we want to
+		 * treat COP1X instructions consistently regardless of which
+		 * code the CPU chose.	Therefore we redirect this trap to
+		 * the FP emulator too.
+		 *
+		 * Then some newer FPU-less processors use this code
+		 * erroneously too, so they are covered by this choice
+		 * as well.
+		 */
+		if (raw_cpu_has_fpu)
+			break;
+		/* Fall through.  */
+
 	case 1:
-		if (used_math())	/* Using the FPU again.  */
+		if (used_math())	/* Using the FPU again.	 */
 			own_fpu(1);
-		else {			/* First time FPU user.  */
+		else {			/* First time FPU user.	 */
 			init_fpu();
 			set_used_math();
 		}
@@ -1040,9 +1066,6 @@ asmlinkage void do_cpu(struct pt_regs *regs)
 	case 2:
 		raw_notifier_call_chain(&cu2_chain, CU2_EXCEPTION, regs);
 		return;
-
-	case 3:
-		break;
 	}
 
 	force_sig(SIGILL, current);
@@ -1091,7 +1114,7 @@ asmlinkage void do_mcheck(struct pt_regs *regs)
 	show_regs(regs);
 
 	if (multi_match) {
-		printk("Index   : %0x\n", read_c0_index());
+		printk("Index	: %0x\n", read_c0_index());
 		printk("Pagemask: %0x\n", read_c0_pagemask());
 		printk("EntryHi : %0*lx\n", field, read_c0_entryhi());
 		printk("EntryLo0: %0*lx\n", field, read_c0_entrylo0());
@@ -1134,7 +1157,7 @@ asmlinkage void do_mt(struct pt_regs *regs)
 		printk(KERN_DEBUG "YIELD Scheduler Exception\n");
 		break;
 	case 5:
-		printk(KERN_DEBUG "Gating Storage Schedulier Exception\n");
+		printk(KERN_DEBUG "Gating Storage Scheduler Exception\n");
 		break;
 	default:
 		printk(KERN_DEBUG "*** UNKNOWN THREAD EXCEPTION %d ***\n",
@@ -1150,7 +1173,7 @@ asmlinkage void do_mt(struct pt_regs *regs)
 asmlinkage void do_dsp(struct pt_regs *regs)
 {
 	if (cpu_has_dsp)
-		panic("Unexpected DSP exception\n");
+		panic("Unexpected DSP exception");
 
 	force_sig(SIGILL, current);
 }
@@ -1158,7 +1181,7 @@ asmlinkage void do_dsp(struct pt_regs *regs)
 asmlinkage void do_reserved(struct pt_regs *regs)
 {
 	/*
-	 * Game over - no way to handle this if it ever occurs.  Most probably
+	 * Game over - no way to handle this if it ever occurs.	 Most probably
 	 * caused by a new unknown cpu type or after another deadly
 	 * hard/software error.
 	 */
@@ -1248,6 +1271,8 @@ static inline void parity_protection_init(void)
 		break;
 
 	case CPU_5KC:
+	case CPU_5KE:
+	case CPU_LOONGSON1:
 		write_c0_ecc(0x80000000);
 		back_to_back_c0_hazard();
 		/* Set the PE bit (bit 31) in the c0_errctl register. */
@@ -1339,9 +1364,18 @@ void ejtag_exception_handler(struct pt_regs *regs)
 
 /*
  * NMI exception handler.
+ * No lock; only written during early bootup by CPU 0.
  */
-NORET_TYPE void ATTRIB_NORET nmi_exception_handler(struct pt_regs *regs)
+static RAW_NOTIFIER_HEAD(nmi_chain);
+
+int register_nmi_notifier(struct notifier_block *nb)
 {
+	return raw_notifier_chain_register(&nmi_chain, nb);
+}
+
+void __noreturn nmi_exception_handler(struct pt_regs *regs)
+{
+	raw_notifier_call_chain(&nmi_chain, 0, regs);
 	bust_spinlocks(1);
 	printk("NMI taken!!!!\n");
 	die("NMI", regs);
@@ -1481,7 +1515,6 @@ void *set_vi_handler(int n, vi_handler_t addr)
 	return set_vi_srs_handler(n, addr, 0);
 }
 
-extern void cpu_cache_init(void);
 extern void tlb_init(void);
 extern void flush_tlb_handlers(void);
 
@@ -1489,6 +1522,7 @@ extern void flush_tlb_handlers(void);
  * Timer interrupt
  */
 int cp0_compare_irq;
+EXPORT_SYMBOL_GPL(cp0_compare_irq);
 int cp0_compare_irq_shift;
 
 /*
@@ -1508,7 +1542,7 @@ static int __init ulri_disable(char *s)
 }
 __setup("noulri", ulri_disable);
 
-void __cpuinit per_cpu_trap_init(void)
+void __cpuinit per_cpu_trap_init(bool is_boot_cpu)
 {
 	unsigned int cpu = smp_processor_id();
 	unsigned int status_set = ST0_CU0;
@@ -1537,7 +1571,7 @@ void __cpuinit per_cpu_trap_init(void)
 #ifdef CONFIG_64BIT
 	status_set |= ST0_FR|ST0_KX|ST0_SX|ST0_UX;
 #endif
-	if (current_cpu_data.isa_level == MIPS_CPU_ISA_IV)
+	if (current_cpu_data.isa_level & MIPS_CPU_ISA_IV)
 		status_set |= ST0_XX;
 	if (cpu_has_dsp)
 		status_set |= ST0_MX;
@@ -1588,7 +1622,7 @@ void __cpuinit per_cpu_trap_init(void)
 			cp0_perfcount_irq = -1;
 	} else {
 		cp0_compare_irq = CP0_LEGACY_COMPARE_IRQ;
-		cp0_compare_irq_shift = cp0_compare_irq;
+		cp0_compare_irq_shift = CP0_LEGACY_PERFCNT_IRQ;
 		cp0_perfcount_irq = -1;
 	}
 
@@ -1607,7 +1641,9 @@ void __cpuinit per_cpu_trap_init(void)
 #ifdef CONFIG_MIPS_MT_SMTC
 	if (bootTC) {
 #endif /* CONFIG_MIPS_MT_SMTC */
-		cpu_cache_init();
+		/* Boot CPU's cache setup in setup_arch(). */
+		if (!is_boot_cpu)
+			cpu_cache_init();
 		tlb_init();
 #ifdef CONFIG_MIPS_MT_SMTC
 	} else if (!secondaryTC) {
@@ -1623,7 +1659,7 @@ void __cpuinit per_cpu_trap_init(void)
 }
 
 /* Install CPU exception handler */
-void __init set_handler(unsigned long offset, void *addr, unsigned long size)
+void __cpuinit set_handler(unsigned long offset, void *addr, unsigned long size)
 {
 	memcpy((void *)(ebase + offset), addr, size);
 	local_flush_icache_range(ebase + offset, ebase + offset + size);
@@ -1669,7 +1705,7 @@ void __init trap_init(void)
 
 #if defined(CONFIG_KGDB)
 	if (kgdb_early_setup)
-		return;	/* Already done */
+		return; /* Already done */
 #endif
 
 	if (cpu_has_veic || cpu_has_vint) {
@@ -1682,7 +1718,9 @@ void __init trap_init(void)
 			ebase += (read_c0_ebase() & 0x3ffff000);
 	}
 
-	per_cpu_trap_init();
+	if (board_ebase_setup)
+		board_ebase_setup();
+	per_cpu_trap_init(true);
 
 	/*
 	 * Copy the generic exception handlers to their final destination.
@@ -1761,7 +1799,7 @@ void __init trap_init(void)
 		 * The R6000 is the only R-series CPU that features a machine
 		 * check exception (similar to the R4000 cache error) and
 		 * unaligned ldc1/sdc1 exception.  The handlers have not been
-		 * written yet.  Well, anyway there is no R6000 machine on the
+		 * written yet.	 Well, anyway there is no R6000 machine on the
 		 * current list of targets for Linux/MIPS.
 		 * (Duh, crap, there is someone with a triple R6k machine)
 		 */
@@ -1785,6 +1823,9 @@ void __init trap_init(void)
 		set_except_vector(25, handle_mt);
 
 	set_except_vector(26, handle_dsp);
+
+	if (board_cache_error_setup)
+		board_cache_error_setup();
 
 	if (cpu_has_vce)
 		/* Special exception: R4[04]00 uses also the divec space. */

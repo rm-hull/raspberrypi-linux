@@ -1,7 +1,7 @@
 /*
  * Hypervisor filesystem for Linux on s390 - debugfs interface
  *
- * Copyright (C) IBM Corp. 2010
+ * Copyright IBM Corp. 2010
  * Author(s): Michael Holzheu <holzheu@linux.vnet.ibm.com>
  */
 
@@ -54,7 +54,7 @@ static ssize_t dbfs_read(struct file *file, char __user *buf,
 	if (*ppos != 0)
 		return 0;
 
-	df = file->f_path.dentry->d_inode->i_private;
+	df = file_inode(file)->i_private;
 	mutex_lock(&df->lock);
 	if (!df->data) {
 		data = hypfs_dbfs_data_alloc(df);

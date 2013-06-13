@@ -613,7 +613,7 @@ static void xemaclite_rx_handler(struct net_device *dev)
 	u32 len;
 
 	len = ETH_FRAME_LEN + ETH_FCS_LEN;
-	skb = dev_alloc_skb(len + ALIGNMENT);
+	skb = netdev_alloc_skb(dev, len + ALIGNMENT);
 	if (!skb) {
 		/* Couldn't get memory. */
 		dev->stats.rx_dropped++;
@@ -1107,7 +1107,7 @@ static struct net_device_ops xemaclite_netdev_ops;
  * Return:	0, if the driver is bound to the Emaclite device, or
  *		a negative error if there is failure.
  */
-static int __devinit xemaclite_of_probe(struct platform_device *ofdev)
+static int xemaclite_of_probe(struct platform_device *ofdev)
 {
 	struct resource r_irq; /* Interrupt resources */
 	struct resource r_mem; /* IO mem resources */
@@ -1136,10 +1136,8 @@ static int __devinit xemaclite_of_probe(struct platform_device *ofdev)
 
 	/* Create an ethernet device instance */
 	ndev = alloc_etherdev(sizeof(struct net_local));
-	if (!ndev) {
-		dev_err(dev, "Could not allocate network device\n");
+	if (!ndev)
 		return -ENOMEM;
-	}
 
 	dev_set_drvdata(dev, ndev);
 	SET_NETDEV_DEV(ndev, &ofdev->dev);
@@ -1231,7 +1229,7 @@ error2:
  *
  * Return:	0, always.
  */
-static int __devexit xemaclite_of_remove(struct platform_device *of_dev)
+static int xemaclite_of_remove(struct platform_device *of_dev)
 {
 	struct device *dev = &of_dev->dev;
 	struct net_device *ndev = dev_get_drvdata(dev);
@@ -1282,7 +1280,7 @@ static struct net_device_ops xemaclite_netdev_ops = {
 };
 
 /* Match table for OF platform binding */
-static struct of_device_id xemaclite_of_match[] __devinitdata = {
+static struct of_device_id xemaclite_of_match[] = {
 	{ .compatible = "xlnx,opb-ethernetlite-1.01.a", },
 	{ .compatible = "xlnx,opb-ethernetlite-1.01.b", },
 	{ .compatible = "xlnx,xps-ethernetlite-1.00.a", },
@@ -1300,7 +1298,7 @@ static struct platform_driver xemaclite_of_driver = {
 		.of_match_table = xemaclite_of_match,
 	},
 	.probe		= xemaclite_of_probe,
-	.remove		= __devexit_p(xemaclite_of_remove),
+	.remove		= xemaclite_of_remove,
 };
 
 module_platform_driver(xemaclite_of_driver);

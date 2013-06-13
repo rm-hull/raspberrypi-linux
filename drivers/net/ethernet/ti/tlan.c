@@ -228,7 +228,7 @@ tlan_get_skb(const struct tlan_list *tag)
 	unsigned long addr;
 
 	addr = tag->buffer[9].address;
-	addr |= (tag->buffer[8].address << 16) << 16;
+	addr |= ((unsigned long) tag->buffer[8].address << 16) << 16;
 	return (struct sk_buff *) addr;
 }
 
@@ -300,7 +300,7 @@ these functions are more or less common to all linux network drivers.
  **************************************************************/
 
 
-static void __devexit tlan_remove_one(struct pci_dev *pdev)
+static void tlan_remove_one(struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
 	struct tlan_priv	*priv = netdev_priv(dev);
@@ -392,7 +392,7 @@ static struct pci_driver tlan_driver = {
 	.name		= "tlan",
 	.id_table	= tlan_pci_tbl,
 	.probe		= tlan_init_one,
-	.remove		= __devexit_p(tlan_remove_one),
+	.remove		= tlan_remove_one,
 	.suspend	= tlan_suspend,
 	.resume		= tlan_resume,
 };
@@ -434,7 +434,7 @@ err_out_pci_free:
 }
 
 
-static int __devinit tlan_init_one(struct pci_dev *pdev,
+static int tlan_init_one(struct pci_dev *pdev,
 				   const struct pci_device_id *ent)
 {
 	return tlan_probe1(pdev, -1, -1, 0, ent);
@@ -460,9 +460,8 @@ static int __devinit tlan_init_one(struct pci_dev *pdev,
 *
 **************************************************************/
 
-static int __devinit tlan_probe1(struct pci_dev *pdev,
-				 long ioaddr, int irq, int rev,
-				 const struct pci_device_id *ent)
+static int tlan_probe1(struct pci_dev *pdev, long ioaddr, int irq, int rev,
+		       const struct pci_device_id *ent)
 {
 
 	struct net_device  *dev;
@@ -486,7 +485,6 @@ static int __devinit tlan_probe1(struct pci_dev *pdev,
 
 	dev = alloc_etherdev(sizeof(struct tlan_priv));
 	if (dev == NULL) {
-		pr_err("Could not allocate memory for device\n");
 		rc = -ENOMEM;
 		goto err_out_regions;
 	}
@@ -2546,7 +2544,7 @@ static void tlan_phy_reset(struct net_device *dev)
 
 	phy = priv->phy[priv->phy_num];
 
-	TLAN_DBG(TLAN_DEBUG_GNRL, "%s: Reseting PHY.\n", dev->name);
+	TLAN_DBG(TLAN_DEBUG_GNRL, "%s: Resetting PHY.\n", dev->name);
 	tlan_mii_sync(dev->base_addr);
 	value = MII_GC_LOOPBK | MII_GC_RESET;
 	tlan_mii_write_reg(dev, phy, MII_GEN_CTL, value);

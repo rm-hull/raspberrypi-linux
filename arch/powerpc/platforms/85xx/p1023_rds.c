@@ -22,7 +22,6 @@
 #include <linux/of_platform.h>
 #include <linux/of_device.h>
 
-#include <asm/system.h>
 #include <asm/time.h>
 #include <asm/machdep.h>
 #include <asm/pci-bridge.h>
@@ -81,21 +80,17 @@ static void __init mpc85xx_rds_setup_arch(void)
 		}
 	}
 
-#ifdef CONFIG_PCI
-	for_each_compatible_node(np, "pci", "fsl,p1023-pcie")
-		fsl_add_bridge(np, 0);
-#endif
-
 	mpc85xx_smp_init();
+
+	fsl_pci_assign_primary();
 }
 
-machine_device_initcall(p1023_rds, mpc85xx_common_publish_devices);
+machine_arch_initcall(p1023_rds, mpc85xx_common_publish_devices);
 
 static void __init mpc85xx_rds_pic_init(void)
 {
-	struct mpic *mpic = mpic_alloc(NULL, 0,
-		MPIC_WANTS_RESET | MPIC_BIG_ENDIAN |
-		MPIC_BROKEN_FRR_NIRQS | MPIC_SINGLE_DEST_CPU,
+	struct mpic *mpic = mpic_alloc(NULL, 0, MPIC_BIG_ENDIAN |
+		MPIC_SINGLE_DEST_CPU,
 		0, 256, " OpenPIC  ");
 
 	BUG_ON(mpic == NULL);

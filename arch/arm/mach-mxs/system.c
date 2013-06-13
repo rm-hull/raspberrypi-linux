@@ -25,7 +25,7 @@
 #include <linux/module.h>
 
 #include <asm/proc-fns.h>
-#include <asm/system.h>
+#include <asm/system_misc.h>
 
 #include <mach/mxs.h>
 #include <mach/common.h>
@@ -66,7 +66,7 @@ static int __init mxs_arch_reset_init(void)
 
 	clk = clk_get_sys("rtc", NULL);
 	if (!IS_ERR(clk))
-		clk_enable(clk);
+		clk_prepare_enable(clk);
 
 	return 0;
 }

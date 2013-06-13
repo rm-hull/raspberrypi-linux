@@ -13,6 +13,7 @@
 #include <linux/errno.h>
 #include <linux/hash.h>
 #include <linux/sunrpc/clnt.h>
+#include <linux/sunrpc/gss_api.h>
 #include <linux/spinlock.h>
 
 #ifdef RPC_DEBUG
@@ -121,6 +122,59 @@ rpcauth_unregister(const struct rpc_authops *ops)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(rpcauth_unregister);
+
+/**
+ * rpcauth_list_flavors - discover registered flavors and pseudoflavors
+ * @array: array to fill in
+ * @size: size of "array"
+ *
+ * Returns the number of array items filled in, or a negative errno.
+ *
+ * The returned array is not sorted by any policy.  Callers should not
+ * rely on the order of the items in the returned array.
+ */
+int
+rpcauth_list_flavors(rpc_authflavor_t *array, int size)
+{
+	rpc_authflavor_t flavor;
+	int result = 0;
+
+	spin_lock(&rpc_authflavor_lock);
+	for (flavor = 0; flavor < RPC_AUTH_MAXFLAVOR; flavor++) {
+		const struct rpc_authops *ops = auth_flavors[flavor];
+		rpc_authflavor_t pseudos[4];
+		int i, len;
+
+		if (result >= size) {
+			result = -ENOMEM;
+			break;
+		}
+
+		if (ops == NULL)
+			continue;
+		if (ops->list_pseudoflavors == NULL) {
+			array[result++] = ops->au_flavor;
+			continue;
+		}
+		len = ops->list_pseudoflavors(pseudos, ARRAY_SIZE(pseudos));
+		if (len < 0) {
+			result = len;
+			break;
+		}
+		for (i = 0; i < len; i++) {
+			if (result >= size) {
+				result = -ENOMEM;
+				break;
+			}
+			array[result++] = pseudos[i];
+		}
+	}
+	spin_unlock(&rpc_authflavor_lock);
+
+	dprintk("RPC:       %s returns %d\n", __func__, result);
+	return result;
+}
+EXPORT_SYMBOL_GPL(rpcauth_list_flavors);
 
 struct rpc_auth *
 rpcauth_create(rpc_authflavor_t pseudoflavor, struct rpc_clnt *clnt)
@@ -353,15 +407,14 @@ rpcauth_lookup_credcache(struct rpc_auth *auth, struct auth_cred * acred,
 {
 	LIST_HEAD(free);
 	struct rpc_cred_cache *cache = auth->au_credcache;
-	struct hlist_node *pos;
 	struct rpc_cred	*cred = NULL,
 			*entry, *new;
 	unsigned int nr;
 
-	nr = hash_long(acred->uid, cache->hashbits);
+	nr = hash_long(from_kuid(&init_user_ns, acred->uid), cache->hashbits);
 
 	rcu_read_lock();
-	hlist_for_each_entry_rcu(entry, pos, &cache->hashtable[nr], cr_hash) {
+	hlist_for_each_entry_rcu(entry, &cache->hashtable[nr], cr_hash) {
 		if (!entry->cr_ops->crmatch(acred, entry, flags))
 			continue;
 		spin_lock(&cache->lock);
@@ -385,7 +438,7 @@ rpcauth_lookup_credcache(struct rpc_auth *auth, struct auth_cred * acred,
 	}
 
 	spin_lock(&cache->lock);
-	hlist_for_each_entry(entry, pos, &cache->hashtable[nr], cr_hash) {
+	hlist_for_each_entry(entry, &cache->hashtable[nr], cr_hash) {
 		if (!entry->cr_ops->crmatch(acred, entry, flags))
 			continue;
 		cred = get_rpccred(entry);
@@ -465,8 +518,8 @@ rpcauth_bind_root_cred(struct rpc_task *task, int lookupflags)
 {
 	struct rpc_auth *auth = task->tk_client->cl_auth;
 	struct auth_cred acred = {
-		.uid = 0,
-		.gid = 0,
+		.uid = GLOBAL_ROOT_UID,
+		.gid = GLOBAL_ROOT_GID,
 	};
 
 	dprintk("RPC: %5u looking up %s cred\n",

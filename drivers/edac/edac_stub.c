@@ -5,7 +5,7 @@
  *
  * 2007 (c) MontaVista Software, Inc.
  * 2010 (c) Advanced Micro Devices Inc.
- *	    Borislav Petkov <borislav.petkov@amd.com>
+ *	    Borislav Petkov <bp@alien8.de>
  *
  * This file is licensed under the terms of the GNU General Public
  * License version 2. This program is licensed "as is" without any
@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/edac.h>
 #include <linux/atomic.h>
+#include <linux/device.h>
 #include <asm/edac.h>
 
 int edac_op_state = EDAC_OPSTATE_INVAL;

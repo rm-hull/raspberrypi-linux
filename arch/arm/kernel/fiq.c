@@ -42,9 +42,9 @@
 #include <linux/seq_file.h>
 
 #include <asm/cacheflush.h>
+#include <asm/cp15.h>
 #include <asm/fiq.h>
 #include <asm/irq.h>
-#include <asm/system.h>
 #include <asm/traps.h>
 
 static unsigned long no_fiq_insn;
@@ -122,25 +122,29 @@ void release_fiq(struct fiq_handler *f)
 	while (current_fiq->fiq_op(current_fiq->dev_id, 0));
 }
 
+static int fiq_start;
+
 void enable_fiq(int fiq)
 {
-	enable_irq(fiq + FIQ_START);
+	enable_irq(fiq + fiq_start);
 }
 
 void disable_fiq(int fiq)
 {
-	disable_irq(fiq + FIQ_START);
+	disable_irq(fiq + fiq_start);
 }
 
 EXPORT_SYMBOL(set_fiq_handler);
 EXPORT_SYMBOL(__set_fiq_regs);	/* defined in fiqasm.S */
 EXPORT_SYMBOL(__get_fiq_regs);	/* defined in fiqasm.S */
+EXPORT_SYMBOL(__FIQ_Branch);	/* defined in fiqasm.S */
 EXPORT_SYMBOL(claim_fiq);
 EXPORT_SYMBOL(release_fiq);
 EXPORT_SYMBOL(enable_fiq);
 EXPORT_SYMBOL(disable_fiq);
 
-void __init init_FIQ(void)
+void __init init_FIQ(int start)
 {
 	no_fiq_insn = *(unsigned long *)0xffff001c;
+	fiq_start = start;
 }

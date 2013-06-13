@@ -47,7 +47,6 @@
 #include <linux/stat.h>
 #include <linux/of_platform.h>
 #include <asm/ibmebus.h>
-#include <asm/abs_addr.h>
 
 static struct device ibmebus_bus_device = { /* fake "parent" device */
 	.init_name = "ibmebus",
@@ -65,7 +64,8 @@ static struct of_device_id __initdata ibmebus_matches[] = {
 static void *ibmebus_alloc_coherent(struct device *dev,
 				    size_t size,
 				    dma_addr_t *dma_handle,
-				    gfp_t flag)
+				    gfp_t flag,
+				    struct dma_attrs *attrs)
 {
 	void *mem;
 
@@ -77,7 +77,8 @@ static void *ibmebus_alloc_coherent(struct device *dev,
 
 static void ibmebus_free_coherent(struct device *dev,
 				  size_t size, void *vaddr,
-				  dma_addr_t dma_handle)
+				  dma_addr_t dma_handle,
+				  struct dma_attrs *attrs)
 {
 	kfree(vaddr);
 }
@@ -136,8 +137,8 @@ static u64 ibmebus_dma_get_required_mask(struct device *dev)
 }
 
 static struct dma_map_ops ibmebus_dma_ops = {
-	.alloc_coherent     = ibmebus_alloc_coherent,
-	.free_coherent      = ibmebus_free_coherent,
+	.alloc              = ibmebus_alloc_coherent,
+	.free               = ibmebus_free_coherent,
 	.map_sg             = ibmebus_map_sg,
 	.unmap_sg           = ibmebus_unmap_sg,
 	.dma_supported      = ibmebus_dma_supported,
@@ -713,7 +714,7 @@ static struct dev_pm_ops ibmebus_bus_dev_pm_ops = {
 
 struct bus_type ibmebus_bus_type = {
 	.name      = "ibmebus",
-	.uevent    = of_device_uevent,
+	.uevent    = of_device_uevent_modalias,
 	.bus_attrs = ibmebus_bus_attrs,
 	.match     = ibmebus_bus_bus_match,
 	.probe     = ibmebus_bus_device_probe,

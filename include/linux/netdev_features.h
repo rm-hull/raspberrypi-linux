@@ -41,7 +41,7 @@ enum {
 	NETIF_F_TSO_ECN_BIT,		/* ... TCP ECN support */
 	NETIF_F_TSO6_BIT,		/* ... TCPv6 segmentation */
 	NETIF_F_FSO_BIT,		/* ... FCoE segmentation */
-	NETIF_F_GSO_RESERVED1,		/* ... free (fill GSO_MASK to 8 bits) */
+	NETIF_F_GSO_GRE_BIT,		/* ... GRE with TSO */
 	/**/NETIF_F_GSO_LAST,		/* [can't be last bit, see GSO_MASK] */
 	NETIF_F_GSO_RESERVED2		/* ... free (fill GSO_MASK to 8 bits) */
 		= NETIF_F_GSO_LAST,
@@ -54,6 +54,8 @@ enum {
 	NETIF_F_RXCSUM_BIT,		/* Receive checksumming offload */
 	NETIF_F_NOCACHE_COPY_BIT,	/* Use no-cache copyfromuser */
 	NETIF_F_LOOPBACK_BIT,		/* Enable loopback */
+	NETIF_F_RXFCS_BIT,		/* Append FCS to skb pkt data */
+	NETIF_F_RXALL_BIT,		/* Receive errored frames too */
 
 	/*
 	 * Add your fresh new feature above and remember to update
@@ -98,6 +100,9 @@ enum {
 #define NETIF_F_TSO		__NETIF_F(TSO)
 #define NETIF_F_UFO		__NETIF_F(UFO)
 #define NETIF_F_VLAN_CHALLENGED	__NETIF_F(VLAN_CHALLENGED)
+#define NETIF_F_RXFCS		__NETIF_F(RXFCS)
+#define NETIF_F_RXALL		__NETIF_F(RXALL)
+#define NETIF_F_GRE_GSO		__NETIF_F(GSO_GRE)
 
 /* Features valid for ethtool to change */
 /* = all defined minus driver/device-class-related */

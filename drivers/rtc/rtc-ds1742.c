@@ -159,7 +159,7 @@ static ssize_t ds1742_nvram_write(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static int __devinit ds1742_rtc_probe(struct platform_device *pdev)
+static int ds1742_rtc_probe(struct platform_device *pdev)
 {
 	struct rtc_device *rtc;
 	struct resource *res;
@@ -222,7 +222,7 @@ static int __devinit ds1742_rtc_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static int __devexit ds1742_rtc_remove(struct platform_device *pdev)
+static int ds1742_rtc_remove(struct platform_device *pdev)
 {
 	struct rtc_plat_data *pdata = platform_get_drvdata(pdev);
 
@@ -233,25 +233,14 @@ static int __devexit ds1742_rtc_remove(struct platform_device *pdev)
 
 static struct platform_driver ds1742_rtc_driver = {
 	.probe		= ds1742_rtc_probe,
-	.remove		= __devexit_p(ds1742_rtc_remove),
+	.remove		= ds1742_rtc_remove,
 	.driver		= {
 		.name	= "rtc-ds1742",
 		.owner	= THIS_MODULE,
 	},
 };
 
-static __init int ds1742_init(void)
-{
-	return platform_driver_register(&ds1742_rtc_driver);
-}
-
-static __exit void ds1742_exit(void)
-{
-	platform_driver_unregister(&ds1742_rtc_driver);
-}
-
-module_init(ds1742_init);
-module_exit(ds1742_exit);
+module_platform_driver(ds1742_rtc_driver);
 
 MODULE_AUTHOR("Atsushi Nemoto <anemo@mba.ocn.ne.jp>");
 MODULE_DESCRIPTION("Dallas DS1742 RTC driver");

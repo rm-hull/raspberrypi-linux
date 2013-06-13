@@ -88,10 +88,8 @@ static void ulog_send(unsigned int nlgroupnum)
 {
 	ulog_buff_t *ub = &ulog_buffers[nlgroupnum];
 
-	if (timer_pending(&ub->timer)) {
-		pr_debug("ulog_send: timer was pending, deleting\n");
-		del_timer(&ub->timer);
-	}
+	pr_debug("ulog_send: timer is deleting\n");
+	del_timer(&ub->timer);
 
 	if (!ub->skb) {
 		pr_debug("ulog_send: nothing to send\n");
@@ -196,12 +194,15 @@ static void ipt_ulog_packet(unsigned int hooknum,
 
 	pr_debug("qlen %d, qthreshold %Zu\n", ub->qlen, loginfo->qthreshold);
 
-	/* NLMSG_PUT contains a hidden goto nlmsg_failure !!! */
-	nlh = NLMSG_PUT(ub->skb, 0, ub->qlen, ULOG_NL_EVENT,
-			sizeof(*pm)+copy_len);
+	nlh = nlmsg_put(ub->skb, 0, ub->qlen, ULOG_NL_EVENT,
+			sizeof(*pm)+copy_len, 0);
+	if (!nlh) {
+		pr_debug("error during nlmsg_put\n");
+		goto out_unlock;
+	}
 	ub->qlen++;
 
-	pm = NLMSG_DATA(nlh);
+	pm = nlmsg_data(nlh);
 
 	/* We might not have a timestamp, get one */
 	if (skb->tstamp.tv64 == 0)
@@ -261,13 +262,11 @@ static void ipt_ulog_packet(unsigned int hooknum,
 			nlh->nlmsg_type = NLMSG_DONE;
 		ulog_send(groupnum);
 	}
-
+out_unlock:
 	spin_unlock_bh(&ulog_lock);
 
 	return;
 
-nlmsg_failure:
-	pr_debug("error during NLMSG_PUT\n");
 alloc_failure:
 	pr_debug("Error building netlink message\n");
 	spin_unlock_bh(&ulog_lock);
@@ -380,6 +379,9 @@ static struct nf_logger ipt_ulog_logger __read_mostly = {
 static int __init ulog_tg_init(void)
 {
 	int ret, i;
+	struct netlink_kernel_cfg cfg = {
+		.groups	= ULOG_MAXNLGROUPS,
+	};
 
 	pr_debug("init module\n");
 
@@ -392,9 +394,7 @@ static int __init ulog_tg_init(void)
 	for (i = 0; i < ULOG_MAXNLGROUPS; i++)
 		setup_timer(&ulog_buffers[i].timer, ulog_timer, i);
 
-	nflognl = netlink_kernel_create(&init_net,
-					NETLINK_NFLOG, ULOG_MAXNLGROUPS, NULL,
-					NULL, THIS_MODULE);
+	nflognl = netlink_kernel_create(&init_net, NETLINK_NFLOG, &cfg);
 	if (!nflognl)
 		return -ENOMEM;
 
@@ -424,10 +424,8 @@ static void __exit ulog_tg_exit(void)
 	/* remove pending timers and free allocated skb's */
 	for (i = 0; i < ULOG_MAXNLGROUPS; i++) {
 		ub = &ulog_buffers[i];
-		if (timer_pending(&ub->timer)) {
-			pr_debug("timer was pending, deleting\n");
-			del_timer(&ub->timer);
-		}
+		pr_debug("timer is deleting\n");
+		del_timer(&ub->timer);
 
 		if (ub->skb) {
 			kfree_skb(ub->skb);

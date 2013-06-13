@@ -145,14 +145,17 @@ struct tea5764_device {
 };
 
 /* I2C code related */
-int tea5764_i2c_read(struct tea5764_device *radio)
+static int tea5764_i2c_read(struct tea5764_device *radio)
 {
 	int i;
 	u16 *p = (u16 *) &radio->regs;
 
 	struct i2c_msg msgs[1] = {
-		{ radio->i2c_client->addr, I2C_M_RD, sizeof(radio->regs),
-			(void *)&radio->regs },
+		{	.addr = radio->i2c_client->addr,
+			.flags = I2C_M_RD,
+			.len = sizeof(radio->regs),
+			.buf = (void *)&radio->regs
+		},
 	};
 	if (i2c_transfer(radio->i2c_client->adapter, msgs, 1) != 1)
 		return -EIO;
@@ -162,12 +165,16 @@ int tea5764_i2c_read(struct tea5764_device *radio)
 	return 0;
 }
 
-int tea5764_i2c_write(struct tea5764_device *radio)
+static int tea5764_i2c_write(struct tea5764_device *radio)
 {
 	struct tea5764_write_regs wr;
 	struct tea5764_regs *r = &radio->regs;
 	struct i2c_msg msgs[1] = {
-		{ radio->i2c_client->addr, 0, sizeof(wr), (void *) &wr },
+		{
+			.addr = radio->i2c_client->addr,
+			.len = sizeof(wr),
+			.buf = (void *)&wr
+		},
 	};
 	wr.intreg  = r->intreg & 0xff;
 	wr.frqset  = __cpu_to_be16(r->frqset);
@@ -448,7 +455,7 @@ static int vidioc_g_audio(struct file *file, void *priv,
 }
 
 static int vidioc_s_audio(struct file *file, void *priv,
-			   struct v4l2_audio *a)
+			   const struct v4l2_audio *a)
 {
 	if (a->index != 0)
 		return -EINVAL;
@@ -486,8 +493,8 @@ static struct video_device tea5764_radio_template = {
 };
 
 /* I2C probe: check if the device exists and register with v4l if it is */
-static int __devinit tea5764_i2c_probe(struct i2c_client *client,
-					const struct i2c_device_id *id)
+static int tea5764_i2c_probe(struct i2c_client *client,
+			     const struct i2c_device_id *id)
 {
 	struct tea5764_device *radio;
 	struct tea5764_regs *r;
@@ -545,7 +552,7 @@ errfr:
 	return ret;
 }
 
-static int __devexit tea5764_i2c_remove(struct i2c_client *client)
+static int tea5764_i2c_remove(struct i2c_client *client)
 {
 	struct tea5764_device *radio = i2c_get_clientdata(client);
 
@@ -571,25 +578,11 @@ static struct i2c_driver tea5764_i2c_driver = {
 		.owner = THIS_MODULE,
 	},
 	.probe = tea5764_i2c_probe,
-	.remove = __devexit_p(tea5764_i2c_remove),
+	.remove = tea5764_i2c_remove,
 	.id_table = tea5764_id,
 };
 
-/* init the driver */
-static int __init tea5764_init(void)
-{
-	int ret = i2c_add_driver(&tea5764_i2c_driver);
-
-	printk(KERN_INFO KBUILD_MODNAME ": " DRIVER_VERSION ": "
-		DRIVER_DESC "\n");
-	return ret;
-}
-
-/* cleanup the driver */
-static void __exit tea5764_exit(void)
-{
-	i2c_del_driver(&tea5764_i2c_driver);
-}
+module_i2c_driver(tea5764_i2c_driver);
 
 MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
@@ -600,6 +593,3 @@ module_param(use_xtal, int, 0);
 MODULE_PARM_DESC(use_xtal, "Chip have a xtal connected in board");
 module_param(radio_nr, int, 0);
 MODULE_PARM_DESC(radio_nr, "video4linux device number to use");
-
-module_init(tea5764_init);
-module_exit(tea5764_exit);

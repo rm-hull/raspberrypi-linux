@@ -220,8 +220,8 @@ int mvs_phy_control(struct asd_sas_phy *sas_phy, enum phy_func func,
 	return rc;
 }
 
-void __devinit mvs_set_sas_addr(struct mvs_info *mvi, int port_id,
-				u32 off_lo, u32 off_hi, u64 sas_addr)
+void mvs_set_sas_addr(struct mvs_info *mvi, int port_id, u32 off_lo,
+		      u32 off_hi, u64 sas_addr)
 {
 	u32 lo = (u32)sas_addr;
 	u32 hi = (u32)(sas_addr>>32);
@@ -308,7 +308,7 @@ int mvs_scan_finished(struct Scsi_Host *shost, unsigned long time)
 	if (mvs_prv->scan_finished == 0)
 		return 0;
 
-	scsi_flush_work(shost);
+	sas_drain_work(sha);
 	return 1;
 }
 
@@ -316,10 +316,13 @@ static int mvs_task_prep_smp(struct mvs_info *mvi,
 			     struct mvs_task_exec_info *tei)
 {
 	int elem, rc, i;
+	struct sas_ha_struct *sha = mvi->sas;
 	struct sas_task *task = tei->task;
 	struct mvs_cmd_hdr *hdr = tei->hdr;
 	struct domain_device *dev = task->dev;
 	struct asd_sas_port *sas_port = dev->port;
+	struct sas_phy *sphy = dev->phy;
+	struct asd_sas_phy *sas_phy = sha->sas_phy[sphy->number];
 	struct scatterlist *sg_req, *sg_resp;
 	u32 req_len, resp_len, tag = tei->tag;
 	void *buf_tmp;
@@ -392,7 +395,7 @@ static int mvs_task_prep_smp(struct mvs_info *mvi,
 	slot->tx = mvi->tx_prod;
 	mvi->tx[mvi->tx_prod] = cpu_to_le32((TXQ_CMD_SMP << TXQ_CMD_SHIFT) |
 					TXQ_MODE_I | tag |
-					(sas_port->phy_mask << TXQ_PHY_SHIFT));
+					(MVS_PHY_ID << TXQ_PHY_SHIFT));
 
 	hdr->flags |= flags;
 	hdr->lens = cpu_to_le32(((resp_len / 4) << 16) | ((req_len - 4) / 4));
@@ -438,11 +441,14 @@ static u32 mvs_get_ncq_tag(struct sas_task *task, u32 *tag)
 static int mvs_task_prep_ata(struct mvs_info *mvi,
 			     struct mvs_task_exec_info *tei)
 {
+	struct sas_ha_struct *sha = mvi->sas;
 	struct sas_task *task = tei->task;
 	struct domain_device *dev = task->dev;
 	struct mvs_device *mvi_dev = dev->lldd_dev;
 	struct mvs_cmd_hdr *hdr = tei->hdr;
 	struct asd_sas_port *sas_port = dev->port;
+	struct sas_phy *sphy = dev->phy;
+	struct asd_sas_phy *sas_phy = sha->sas_phy[sphy->number];
 	struct mvs_slot_info *slot;
 	void *buf_prd;
 	u32 tag = tei->tag, hdr_tag;
@@ -462,7 +468,7 @@ static int mvs_task_prep_ata(struct mvs_info *mvi,
 	slot->tx = mvi->tx_prod;
 	del_q = TXQ_MODE_I | tag |
 		(TXQ_CMD_STP << TXQ_CMD_SHIFT) |
-		(sas_port->phy_mask << TXQ_PHY_SHIFT) |
+		(MVS_PHY_ID << TXQ_PHY_SHIFT) |
 		(mvi_dev->taskfileset << TXQ_SRS_SHIFT);
 	mvi->tx[mvi->tx_prod] = cpu_to_le32(del_q);
 
@@ -885,16 +891,12 @@ static int mvs_task_exec(struct sas_task *task, const int num, gfp_t gfp_flags,
 				struct completion *completion, int is_tmf,
 				struct mvs_tmf_task *tmf)
 {
-	struct domain_device *dev = task->dev;
 	struct mvs_info *mvi = NULL;
 	u32 rc = 0;
 	u32 pass = 0;
 	unsigned long flags = 0;
 
 	mvi = ((struct mvs_device *)task->dev->lldd_dev)->mvi_info;
-
-	if ((dev->dev_type == SATA_DEV) && (dev->sata_dev.ap != NULL))
-		spin_unlock_irq(dev->sata_dev.ap->lock);
 
 	spin_lock_irqsave(&mvi->lock, flags);
 	rc = mvs_task_prep(task, mvi, is_tmf, tmf, &pass);
@@ -905,9 +907,6 @@ static int mvs_task_exec(struct sas_task *task, const int num, gfp_t gfp_flags,
 			MVS_CHIP_DISP->start_delivery(mvi, (mvi->tx_prod - 1) &
 				(MVS_CHIP_SLOT_SZ - 1));
 	spin_unlock_irqrestore(&mvi->lock, flags);
-
-	if ((dev->dev_type == SATA_DEV) && (dev->sata_dev.ap != NULL))
-		spin_lock_irq(dev->sata_dev.ap->lock);
 
 	return rc;
 }
@@ -1371,9 +1370,9 @@ void mvs_dev_gone(struct domain_device *dev)
 
 static void mvs_task_done(struct sas_task *task)
 {
-	if (!del_timer(&task->timer))
+	if (!del_timer(&task->slow_task->timer))
 		return;
-	complete(&task->completion);
+	complete(&task->slow_task->completion);
 }
 
 static void mvs_tmf_timedout(unsigned long data)
@@ -1381,7 +1380,7 @@ static void mvs_tmf_timedout(unsigned long data)
 	struct sas_task *task = (struct sas_task *)data;
 
 	task->task_state_flags |= SAS_TASK_STATE_ABORTED;
-	complete(&task->completion);
+	complete(&task->slow_task->completion);
 }
 
 #define MVS_TASK_TIMEOUT 20
@@ -1392,7 +1391,7 @@ static int mvs_exec_internal_tmf_task(struct domain_device *dev,
 	struct sas_task *task = NULL;
 
 	for (retry = 0; retry < 3; retry++) {
-		task = sas_alloc_task(GFP_KERNEL);
+		task = sas_alloc_slow_task(GFP_KERNEL);
 		if (!task)
 			return -ENOMEM;
 
@@ -1402,20 +1401,20 @@ static int mvs_exec_internal_tmf_task(struct domain_device *dev,
 		memcpy(&task->ssp_task, parameter, para_len);
 		task->task_done = mvs_task_done;
 
-		task->timer.data = (unsigned long) task;
-		task->timer.function = mvs_tmf_timedout;
-		task->timer.expires = jiffies + MVS_TASK_TIMEOUT*HZ;
-		add_timer(&task->timer);
+		task->slow_task->timer.data = (unsigned long) task;
+		task->slow_task->timer.function = mvs_tmf_timedout;
+		task->slow_task->timer.expires = jiffies + MVS_TASK_TIMEOUT*HZ;
+		add_timer(&task->slow_task->timer);
 
 		res = mvs_task_exec(task, 1, GFP_KERNEL, NULL, 1, tmf);
 
 		if (res) {
-			del_timer(&task->timer);
+			del_timer(&task->slow_task->timer);
 			mv_printk("executing internel task failed:%d\n", res);
 			goto ex_err;
 		}
 
-		wait_for_completion(&task->completion);
+		wait_for_completion(&task->slow_task->completion);
 		res = TMF_RESP_FUNC_FAILED;
 		/* Even TMF timed out, return direct. */
 		if ((task->task_state_flags & SAS_TASK_STATE_ABORTED)) {
@@ -1480,10 +1479,11 @@ static int mvs_debug_issue_ssp_tmf(struct domain_device *dev,
 static int mvs_debug_I_T_nexus_reset(struct domain_device *dev)
 {
 	int rc;
-	struct sas_phy *phy = sas_find_local_phy(dev);
+	struct sas_phy *phy = sas_get_local_phy(dev);
 	int reset_type = (dev->dev_type == SATA_DEV ||
 			(dev->tproto & SAS_PROTOCOL_STP)) ? 0 : 1;
 	rc = sas_phy_reset(phy, reset_type);
+	sas_put_local_phy(phy);
 	msleep(2000);
 	return rc;
 }
@@ -1635,7 +1635,7 @@ int mvs_abort_task(struct sas_task *task)
 			mv_dprintk("mvs_abort_task() mvi=%p task=%p "
 				   "slot=%p slot_idx=x%x\n",
 				   mvi, task, slot, slot_idx);
-			mvs_tmf_timedout((unsigned long)task);
+			task->task_state_flags |= SAS_TASK_STATE_ABORTED;
 			mvs_slot_task_free(mvi, task, slot, slot_idx);
 			rc = TMF_RESP_FUNC_COMPLETE;
 			goto out;
@@ -1885,11 +1885,11 @@ int mvs_slot_complete(struct mvs_info *mvi, u32 rx_desc, u32 flags)
 	case SAS_PROTOCOL_SMP: {
 			struct scatterlist *sg_resp = &task->smp_task.smp_resp;
 			tstat->stat = SAM_STAT_GOOD;
-			to = kmap_atomic(sg_page(sg_resp), KM_IRQ0);
+			to = kmap_atomic(sg_page(sg_resp));
 			memcpy(to + sg_resp->offset,
 				slot->response + sizeof(struct mvs_err_info),
 				sg_dma_len(sg_resp));
-			kunmap_atomic(to, KM_IRQ0);
+			kunmap_atomic(to);
 			break;
 		}
 

@@ -31,7 +31,6 @@
 
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/processor.h>
 #include <asm/mmu.h>
@@ -39,11 +38,6 @@
 #include <asm/pgalloc.h>
 
 void (*powersave) (void) = NULL;
-
-static inline void pm_idle(void)
-{
-	barrier();
-}
 
 void cpu_idle(void)
 {

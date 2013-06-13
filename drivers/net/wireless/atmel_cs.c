@@ -48,7 +48,6 @@
 #include <pcmcia/ciscode.h>
 
 #include <asm/io.h>
-#include <asm/system.h>
 #include <linux/wireless.h>
 
 #include "atmel.h"
@@ -80,10 +79,9 @@ static int atmel_probe(struct pcmcia_device *p_dev)
 
 	/* Allocate space for private device-specific data */
 	local = kzalloc(sizeof(local_info_t), GFP_KERNEL);
-	if (!local) {
-		printk(KERN_ERR "atmel_cs: no memory for new device\n");
+	if (!local)
 		return -ENOMEM;
-	}
+
 	p_dev->priv = local;
 
 	return atmel_config(p_dev);

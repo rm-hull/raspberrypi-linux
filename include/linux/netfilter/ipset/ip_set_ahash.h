@@ -99,6 +99,22 @@ struct ip_set_hash {
 #endif
 };
 
+static size_t
+htable_size(u8 hbits)
+{
+	size_t hsize;
+
+	/* We must fit both into u32 in jhash and size_t */
+	if (hbits > 31)
+		return 0;
+	hsize = jhash_size(hbits);
+	if ((((size_t)-1) - sizeof(struct htable))/sizeof(struct hbucket)
+	    < hsize)
+		return 0;
+
+	return hsize * sizeof(struct hbucket) + sizeof(struct htable);
+}
+
 /* Compute htable_bits from the user input parameter hashsize */
 static u8
 htable_bits(u32 hashsize)
@@ -113,52 +129,67 @@ htable_bits(u32 hashsize)
 }
 
 #ifdef IP_SET_HASH_WITH_NETS
+#ifdef IP_SET_HASH_WITH_NETS_PACKED
+/* When cidr is packed with nomatch, cidr - 1 is stored in the entry */
+#define CIDR(cidr)	(cidr + 1)
+#else
+#define CIDR(cidr)	(cidr)
+#endif
 
 #define SET_HOST_MASK(family)	(family == AF_INET ? 32 : 128)
+#ifdef IP_SET_HASH_WITH_MULTI
+#define NETS_LENGTH(family)	(SET_HOST_MASK(family) + 1)
+#else
+#define NETS_LENGTH(family)	SET_HOST_MASK(family)
+#endif
 
 /* Network cidr size book keeping when the hash stores different
  * sized networks */
 static void
-add_cidr(struct ip_set_hash *h, u8 cidr, u8 host_mask)
+add_cidr(struct ip_set_hash *h, u8 cidr, u8 nets_length)
 {
-	u8 i;
+	int i, j;
 
-	++h->nets[cidr-1].nets;
-
-	pr_debug("add_cidr added %u: %u\n", cidr, h->nets[cidr-1].nets);
-
-	if (h->nets[cidr-1].nets > 1)
-		return;
-
-	/* New cidr size */
-	for (i = 0; i < host_mask && h->nets[i].cidr; i++) {
-		/* Add in increasing prefix order, so larger cidr first */
-		if (h->nets[i].cidr < cidr)
-			swap(h->nets[i].cidr, cidr);
+	/* Add in increasing prefix order, so larger cidr first */
+	for (i = 0, j = -1; i < nets_length && h->nets[i].nets; i++) {
+		if (j != -1)
+			continue;
+		else if (h->nets[i].cidr < cidr)
+			j = i;
+		else if (h->nets[i].cidr == cidr) {
+			h->nets[i].nets++;
+			return;
+		}
 	}
-	if (i < host_mask)
-		h->nets[i].cidr = cidr;
+	if (j != -1) {
+		for (; i > j; i--) {
+			h->nets[i].cidr = h->nets[i - 1].cidr;
+			h->nets[i].nets = h->nets[i - 1].nets;
+		}
+	}
+	h->nets[i].cidr = cidr;
+	h->nets[i].nets = 1;
 }
 
 static void
-del_cidr(struct ip_set_hash *h, u8 cidr, u8 host_mask)
+del_cidr(struct ip_set_hash *h, u8 cidr, u8 nets_length)
 {
-	u8 i;
+	u8 i, j;
 
-	--h->nets[cidr-1].nets;
+	for (i = 0; i < nets_length - 1 && h->nets[i].cidr != cidr; i++)
+		;
+	h->nets[i].nets--;
 
-	pr_debug("del_cidr deleted %u: %u\n", cidr, h->nets[cidr-1].nets);
-
-	if (h->nets[cidr-1].nets != 0)
+	if (h->nets[i].nets != 0)
 		return;
 
-	/* All entries with this cidr size deleted, so cleanup h->cidr[] */
-	for (i = 0; i < host_mask - 1 && h->nets[i].cidr; i++) {
-		if (h->nets[i].cidr == cidr)
-			h->nets[i].cidr = cidr = h->nets[i+1].cidr;
+	for (j = i; j < nets_length - 1 && h->nets[j].nets; j++) {
+		h->nets[j].cidr = h->nets[j + 1].cidr;
+		h->nets[j].nets = h->nets[j + 1].nets;
 	}
-	h->nets[i - 1].cidr = 0;
 }
+#else
+#define NETS_LENGTH(family)		0
 #endif
 
 /* Destroy the hashtable part of the set */
@@ -180,14 +211,14 @@ ahash_destroy(struct htable *t)
 
 /* Calculate the actual memory size of the set data */
 static size_t
-ahash_memsize(const struct ip_set_hash *h, size_t dsize, u8 host_mask)
+ahash_memsize(const struct ip_set_hash *h, size_t dsize, u8 nets_length)
 {
 	u32 i;
 	struct htable *t = h->table;
 	size_t memsize = sizeof(*h)
 			 + sizeof(*t)
 #ifdef IP_SET_HASH_WITH_NETS
-			 + sizeof(struct ip_set_hash_nets) * host_mask
+			 + sizeof(struct ip_set_hash_nets) * nets_length
 #endif
 			 + jhash_size(t->htable_bits) * sizeof(struct hbucket);
 
@@ -216,7 +247,7 @@ ip_set_hash_flush(struct ip_set *set)
 	}
 #ifdef IP_SET_HASH_WITH_NETS
 	memset(h->nets, 0, sizeof(struct ip_set_hash_nets)
-			   * SET_HOST_MASK(set->family));
+			   * NETS_LENGTH(set->family));
 #endif
 	h->elements = 0;
 }
@@ -249,9 +280,6 @@ ip_set_hash_destroy(struct ip_set *set)
 (jhash2((u32 *)(data), HKEY_DATALEN/sizeof(u32), initval)	\
 	& jhash_mask(htable_bits))
 
-#define CONCAT(a, b, c)		a##b##c
-#define TOKEN(a, b, c)		CONCAT(a, b, c)
-
 /* Type/family dependent function prototypes */
 
 #define type_pf_data_equal	TOKEN(TYPE, PF, _data_equal)
@@ -262,6 +290,13 @@ ip_set_hash_destroy(struct ip_set *set)
 #define type_pf_data_list	TOKEN(TYPE, PF, _data_list)
 #define type_pf_data_tlist	TOKEN(TYPE, PF, _data_tlist)
 #define type_pf_data_next	TOKEN(TYPE, PF, _data_next)
+#define type_pf_data_flags	TOKEN(TYPE, PF, _data_flags)
+#define type_pf_data_reset_flags TOKEN(TYPE, PF, _data_reset_flags)
+#ifdef IP_SET_HASH_WITH_NETS
+#define type_pf_data_match	TOKEN(TYPE, PF, _data_match)
+#else
+#define type_pf_data_match(d)	1
+#endif
 
 #define type_pf_elem		TOKEN(TYPE, PF, _elem)
 #define type_pf_telem		TOKEN(TYPE, PF, _telem)
@@ -308,8 +343,10 @@ ip_set_hash_destroy(struct ip_set *set)
  * we spare the maintenance of the internal counters. */
 static int
 type_pf_elem_add(struct hbucket *n, const struct type_pf_elem *value,
-		 u8 ahash_max)
+		 u8 ahash_max, u32 cadt_flags)
 {
+	struct type_pf_elem *data;
+
 	if (n->pos >= n->size) {
 		void *tmp;
 
@@ -330,7 +367,13 @@ type_pf_elem_add(struct hbucket *n, const struct type_pf_elem *value,
 		n->value = tmp;
 		n->size += AHASH_INIT_SIZE;
 	}
-	type_pf_data_copy(ahash_data(n, n->pos++), value);
+	data = ahash_data(n, n->pos++);
+	type_pf_data_copy(data, value);
+#ifdef IP_SET_HASH_WITH_NETS
+	/* Resizing won't overwrite stored flags */
+	if (cadt_flags)
+		type_pf_data_flags(data, cadt_flags);
+#endif
 	return 0;
 }
 
@@ -343,9 +386,9 @@ type_pf_resize(struct ip_set *set, bool retried)
 	struct ip_set_hash *h = set->data;
 	struct htable *t, *orig = h->table;
 	u8 htable_bits = orig->htable_bits;
-	const struct type_pf_elem *data;
+	struct type_pf_elem *data;
 	struct hbucket *n, *m;
-	u32 i, j;
+	u32 i, j, flags = 0;
 	int ret;
 
 retry:
@@ -353,9 +396,12 @@ retry:
 	htable_bits++;
 	pr_debug("attempt to resize set %s from %u to %u, t %p\n",
 		 set->name, orig->htable_bits, htable_bits, orig);
-	if (!htable_bits)
+	if (!htable_bits) {
 		/* In case we have plenty of memory :-) */
+		pr_warning("Cannot increase the hashsize of set %s further\n",
+			   set->name);
 		return -IPSET_ERR_HASH_FULL;
+	}
 	t = ip_set_alloc(sizeof(*t)
 			 + jhash_size(htable_bits) * sizeof(struct hbucket));
 	if (!t)
@@ -367,9 +413,16 @@ retry:
 		n = hbucket(orig, i);
 		for (j = 0; j < n->pos; j++) {
 			data = ahash_data(n, j);
+#ifdef IP_SET_HASH_WITH_NETS
+			flags = 0;
+			type_pf_data_reset_flags(data, &flags);
+#endif
 			m = hbucket(t, HKEY(data, h->initval, htable_bits));
-			ret = type_pf_elem_add(m, data, AHASH_MAX(h));
+			ret = type_pf_elem_add(m, data, AHASH_MAX(h), flags);
 			if (ret < 0) {
+#ifdef IP_SET_HASH_WITH_NETS
+				type_pf_data_flags(data, flags);
+#endif
 				read_unlock_bh(&set->lock);
 				ahash_destroy(t);
 				if (ret == -EAGAIN)
@@ -406,9 +459,14 @@ type_pf_add(struct ip_set *set, void *value, u32 timeout, u32 flags)
 	struct hbucket *n;
 	int i, ret = 0;
 	u32 key, multi = 0;
+	u32 cadt_flags = flags >> 16;
 
-	if (h->elements >= h->maxelem)
+	if (h->elements >= h->maxelem) {
+		if (net_ratelimit())
+			pr_warning("Set %s is full, maxelem %u reached\n",
+				   set->name, h->maxelem);
 		return -IPSET_ERR_HASH_FULL;
+	}
 
 	rcu_read_lock_bh();
 	t = rcu_dereference_bh(h->table);
@@ -416,11 +474,17 @@ type_pf_add(struct ip_set *set, void *value, u32 timeout, u32 flags)
 	n = hbucket(t, key);
 	for (i = 0; i < n->pos; i++)
 		if (type_pf_data_equal(ahash_data(n, i), d, &multi)) {
+#ifdef IP_SET_HASH_WITH_NETS
+			if (flags & IPSET_FLAG_EXIST)
+				/* Support overwriting just the flags */
+				type_pf_data_flags(ahash_data(n, i),
+						   cadt_flags);
+#endif
 			ret = -IPSET_ERR_EXIST;
 			goto out;
 		}
 	TUNE_AHASH_MAX(h, multi);
-	ret = type_pf_elem_add(n, value, AHASH_MAX(h));
+	ret = type_pf_elem_add(n, value, AHASH_MAX(h), cadt_flags);
 	if (ret != 0) {
 		if (ret == -EAGAIN)
 			type_pf_data_next(h, d);
@@ -428,7 +492,7 @@ type_pf_add(struct ip_set *set, void *value, u32 timeout, u32 flags)
 	}
 
 #ifdef IP_SET_HASH_WITH_NETS
-	add_cidr(h, d->cidr, HOST_MASK);
+	add_cidr(h, CIDR(d->cidr), NETS_LENGTH(set->family));
 #endif
 	h->elements++;
 out:
@@ -463,7 +527,7 @@ type_pf_del(struct ip_set *set, void *value, u32 timeout, u32 flags)
 		n->pos--;
 		h->elements--;
 #ifdef IP_SET_HASH_WITH_NETS
-		del_cidr(h, d->cidr, HOST_MASK);
+		del_cidr(h, CIDR(d->cidr), NETS_LENGTH(set->family));
 #endif
 		if (n->pos + AHASH_INIT_SIZE < n->size) {
 			void *tmp = kzalloc((n->size - AHASH_INIT_SIZE)
@@ -496,17 +560,17 @@ type_pf_test_cidrs(struct ip_set *set, struct type_pf_elem *d, u32 timeout)
 	const struct type_pf_elem *data;
 	int i, j = 0;
 	u32 key, multi = 0;
-	u8 host_mask = SET_HOST_MASK(set->family);
+	u8 nets_length = NETS_LENGTH(set->family);
 
 	pr_debug("test by nets\n");
-	for (; j < host_mask && h->nets[j].cidr && !multi; j++) {
+	for (; j < nets_length && h->nets[j].nets && !multi; j++) {
 		type_pf_data_netmask(d, h->nets[j].cidr);
 		key = HKEY(d, h->initval, t->htable_bits);
 		n = hbucket(t, key);
 		for (i = 0; i < n->pos; i++) {
 			data = ahash_data(n, i);
 			if (type_pf_data_equal(data, d, &multi))
-				return 1;
+				return type_pf_data_match(data);
 		}
 	}
 	return 0;
@@ -528,7 +592,7 @@ type_pf_test(struct ip_set *set, void *value, u32 timeout, u32 flags)
 #ifdef IP_SET_HASH_WITH_NETS
 	/* If we test an IP address and not a network address,
 	 * try all possible network sizes */
-	if (d->cidr == SET_HOST_MASK(set->family))
+	if (CIDR(d->cidr) == SET_HOST_MASK(set->family))
 		return type_pf_test_cidrs(set, d, timeout);
 #endif
 
@@ -537,7 +601,7 @@ type_pf_test(struct ip_set *set, void *value, u32 timeout, u32 flags)
 	for (i = 0; i < n->pos; i++) {
 		data = ahash_data(n, i);
 		if (type_pf_data_equal(data, d, &multi))
-			return 1;
+			return type_pf_data_match(data);
 	}
 	return 0;
 }
@@ -554,23 +618,26 @@ type_pf_head(struct ip_set *set, struct sk_buff *skb)
 	memsize = ahash_memsize(h, with_timeout(h->timeout)
 					? sizeof(struct type_pf_telem)
 					: sizeof(struct type_pf_elem),
-				set->family == AF_INET ? 32 : 128);
+				NETS_LENGTH(set->family));
 	read_unlock_bh(&set->lock);
 
 	nested = ipset_nest_start(skb, IPSET_ATTR_DATA);
 	if (!nested)
 		goto nla_put_failure;
-	NLA_PUT_NET32(skb, IPSET_ATTR_HASHSIZE,
-		      htonl(jhash_size(h->table->htable_bits)));
-	NLA_PUT_NET32(skb, IPSET_ATTR_MAXELEM, htonl(h->maxelem));
+	if (nla_put_net32(skb, IPSET_ATTR_HASHSIZE,
+			  htonl(jhash_size(h->table->htable_bits))) ||
+	    nla_put_net32(skb, IPSET_ATTR_MAXELEM, htonl(h->maxelem)))
+		goto nla_put_failure;
 #ifdef IP_SET_HASH_WITH_NETMASK
-	if (h->netmask != HOST_MASK)
-		NLA_PUT_U8(skb, IPSET_ATTR_NETMASK, h->netmask);
+	if (h->netmask != HOST_MASK &&
+	    nla_put_u8(skb, IPSET_ATTR_NETMASK, h->netmask))
+		goto nla_put_failure;
 #endif
-	NLA_PUT_NET32(skb, IPSET_ATTR_REFERENCES, htonl(set->ref - 1));
-	NLA_PUT_NET32(skb, IPSET_ATTR_MEMSIZE, htonl(memsize));
-	if (with_timeout(h->timeout))
-		NLA_PUT_NET32(skb, IPSET_ATTR_TIMEOUT, htonl(h->timeout));
+	if (nla_put_net32(skb, IPSET_ATTR_REFERENCES, htonl(set->ref - 1)) ||
+	    nla_put_net32(skb, IPSET_ATTR_MEMSIZE, htonl(memsize)) ||
+	    (with_timeout(h->timeout) &&
+	     nla_put_net32(skb, IPSET_ATTR_TIMEOUT, htonl(h->timeout))))
+		goto nla_put_failure;
 	ipset_nest_end(skb, nested);
 
 	return 0;
@@ -637,7 +704,7 @@ nla_put_failure:
 }
 
 static int
-type_pf_kadt(struct ip_set *set, const struct sk_buff * skb,
+type_pf_kadt(struct ip_set *set, const struct sk_buff *skb,
 	     const struct xt_action_param *par,
 	     enum ipset_adt adt, const struct ip_set_adt_opt *opt);
 static int
@@ -693,7 +760,7 @@ type_pf_data_timeout_set(struct type_pf_elem *data, u32 timeout)
 
 static int
 type_pf_elem_tadd(struct hbucket *n, const struct type_pf_elem *value,
-		  u8 ahash_max, u32 timeout)
+		  u8 ahash_max, u32 cadt_flags, u32 timeout)
 {
 	struct type_pf_elem *data;
 
@@ -720,12 +787,17 @@ type_pf_elem_tadd(struct hbucket *n, const struct type_pf_elem *value,
 	data = ahash_tdata(n, n->pos++);
 	type_pf_data_copy(data, value);
 	type_pf_data_timeout_set(data, timeout);
+#ifdef IP_SET_HASH_WITH_NETS
+	/* Resizing won't overwrite stored flags */
+	if (cadt_flags)
+		type_pf_data_flags(data, cadt_flags);
+#endif
 	return 0;
 }
 
 /* Delete expired elements from the hashtable */
 static void
-type_pf_expire(struct ip_set_hash *h)
+type_pf_expire(struct ip_set_hash *h, u8 nets_length)
 {
 	struct htable *t = h->table;
 	struct hbucket *n;
@@ -740,7 +812,7 @@ type_pf_expire(struct ip_set_hash *h)
 			if (type_pf_data_expired(data)) {
 				pr_debug("expired %u/%u\n", i, j);
 #ifdef IP_SET_HASH_WITH_NETS
-				del_cidr(h, data->cidr, HOST_MASK);
+				del_cidr(h, CIDR(data->cidr), nets_length);
 #endif
 				if (j != n->pos - 1)
 					/* Not last one */
@@ -772,16 +844,16 @@ type_pf_tresize(struct ip_set *set, bool retried)
 	struct ip_set_hash *h = set->data;
 	struct htable *t, *orig = h->table;
 	u8 htable_bits = orig->htable_bits;
-	const struct type_pf_elem *data;
+	struct type_pf_elem *data;
 	struct hbucket *n, *m;
-	u32 i, j;
+	u32 i, j, flags = 0;
 	int ret;
 
 	/* Try to cleanup once */
 	if (!retried) {
 		i = h->elements;
 		write_lock_bh(&set->lock);
-		type_pf_expire(set->data);
+		type_pf_expire(set->data, NETS_LENGTH(set->family));
 		write_unlock_bh(&set->lock);
 		if (h->elements <  i)
 			return 0;
@@ -790,9 +862,14 @@ type_pf_tresize(struct ip_set *set, bool retried)
 retry:
 	ret = 0;
 	htable_bits++;
-	if (!htable_bits)
+	pr_debug("attempt to resize set %s from %u to %u, t %p\n",
+		 set->name, orig->htable_bits, htable_bits, orig);
+	if (!htable_bits) {
 		/* In case we have plenty of memory :-) */
+		pr_warning("Cannot increase the hashsize of set %s further\n",
+			   set->name);
 		return -IPSET_ERR_HASH_FULL;
+	}
 	t = ip_set_alloc(sizeof(*t)
 			 + jhash_size(htable_bits) * sizeof(struct hbucket));
 	if (!t)
@@ -804,10 +881,17 @@ retry:
 		n = hbucket(orig, i);
 		for (j = 0; j < n->pos; j++) {
 			data = ahash_tdata(n, j);
+#ifdef IP_SET_HASH_WITH_NETS
+			flags = 0;
+			type_pf_data_reset_flags(data, &flags);
+#endif
 			m = hbucket(t, HKEY(data, h->initval, htable_bits));
-			ret = type_pf_elem_tadd(m, data, AHASH_MAX(h),
-						type_pf_data_timeout(data));
+			ret = type_pf_elem_tadd(m, data, AHASH_MAX(h), flags,
+				ip_set_timeout_get(type_pf_data_timeout(data)));
 			if (ret < 0) {
+#ifdef IP_SET_HASH_WITH_NETS
+				type_pf_data_flags(data, flags);
+#endif
 				read_unlock_bh(&set->lock);
 				ahash_destroy(t);
 				if (ret == -EAGAIN)
@@ -839,12 +923,17 @@ type_pf_tadd(struct ip_set *set, void *value, u32 timeout, u32 flags)
 	int ret = 0, i, j = AHASH_MAX(h) + 1;
 	bool flag_exist = flags & IPSET_FLAG_EXIST;
 	u32 key, multi = 0;
+	u32 cadt_flags = flags >> 16;
 
 	if (h->elements >= h->maxelem)
 		/* FIXME: when set is full, we slow down here */
-		type_pf_expire(h);
-	if (h->elements >= h->maxelem)
+		type_pf_expire(h, NETS_LENGTH(set->family));
+	if (h->elements >= h->maxelem) {
+		if (net_ratelimit())
+			pr_warning("Set %s is full, maxelem %u reached\n",
+				   set->name, h->maxelem);
 		return -IPSET_ERR_HASH_FULL;
+	}
 
 	rcu_read_lock_bh();
 	t = rcu_dereference_bh(h->table);
@@ -854,6 +943,7 @@ type_pf_tadd(struct ip_set *set, void *value, u32 timeout, u32 flags)
 		data = ahash_tdata(n, i);
 		if (type_pf_data_equal(data, d, &multi)) {
 			if (type_pf_data_expired(data) || flag_exist)
+				/* Just timeout value may be updated */
 				j = i;
 			else {
 				ret = -IPSET_ERR_EXIST;
@@ -866,15 +956,18 @@ type_pf_tadd(struct ip_set *set, void *value, u32 timeout, u32 flags)
 	if (j != AHASH_MAX(h) + 1) {
 		data = ahash_tdata(n, j);
 #ifdef IP_SET_HASH_WITH_NETS
-		del_cidr(h, data->cidr, HOST_MASK);
-		add_cidr(h, d->cidr, HOST_MASK);
+		del_cidr(h, CIDR(data->cidr), NETS_LENGTH(set->family));
+		add_cidr(h, CIDR(d->cidr), NETS_LENGTH(set->family));
 #endif
 		type_pf_data_copy(data, d);
 		type_pf_data_timeout_set(data, timeout);
+#ifdef IP_SET_HASH_WITH_NETS
+		type_pf_data_flags(data, cadt_flags);
+#endif
 		goto out;
 	}
 	TUNE_AHASH_MAX(h, multi);
-	ret = type_pf_elem_tadd(n, d, AHASH_MAX(h), timeout);
+	ret = type_pf_elem_tadd(n, d, AHASH_MAX(h), cadt_flags, timeout);
 	if (ret != 0) {
 		if (ret == -EAGAIN)
 			type_pf_data_next(h, d);
@@ -882,7 +975,7 @@ type_pf_tadd(struct ip_set *set, void *value, u32 timeout, u32 flags)
 	}
 
 #ifdef IP_SET_HASH_WITH_NETS
-	add_cidr(h, d->cidr, HOST_MASK);
+	add_cidr(h, CIDR(d->cidr), NETS_LENGTH(set->family));
 #endif
 	h->elements++;
 out:
@@ -916,7 +1009,7 @@ type_pf_tdel(struct ip_set *set, void *value, u32 timeout, u32 flags)
 		n->pos--;
 		h->elements--;
 #ifdef IP_SET_HASH_WITH_NETS
-		del_cidr(h, d->cidr, HOST_MASK);
+		del_cidr(h, CIDR(d->cidr), NETS_LENGTH(set->family));
 #endif
 		if (n->pos + AHASH_INIT_SIZE < n->size) {
 			void *tmp = kzalloc((n->size - AHASH_INIT_SIZE)
@@ -946,16 +1039,25 @@ type_pf_ttest_cidrs(struct ip_set *set, struct type_pf_elem *d, u32 timeout)
 	struct hbucket *n;
 	int i, j = 0;
 	u32 key, multi = 0;
-	u8 host_mask = SET_HOST_MASK(set->family);
+	u8 nets_length = NETS_LENGTH(set->family);
 
-	for (; j < host_mask && h->nets[j].cidr && !multi; j++) {
+	for (; j < nets_length && h->nets[j].nets && !multi; j++) {
 		type_pf_data_netmask(d, h->nets[j].cidr);
 		key = HKEY(d, h->initval, t->htable_bits);
 		n = hbucket(t, key);
 		for (i = 0; i < n->pos; i++) {
 			data = ahash_tdata(n, i);
-			if (type_pf_data_equal(data, d, &multi))
-				return !type_pf_data_expired(data);
+#ifdef IP_SET_HASH_WITH_MULTI
+			if (type_pf_data_equal(data, d, &multi)) {
+				if (!type_pf_data_expired(data))
+					return type_pf_data_match(data);
+				multi = 0;
+			}
+#else
+			if (type_pf_data_equal(data, d, &multi) &&
+			    !type_pf_data_expired(data))
+				return type_pf_data_match(data);
+#endif
 		}
 	}
 	return 0;
@@ -973,15 +1075,16 @@ type_pf_ttest(struct ip_set *set, void *value, u32 timeout, u32 flags)
 	u32 key, multi = 0;
 
 #ifdef IP_SET_HASH_WITH_NETS
-	if (d->cidr == SET_HOST_MASK(set->family))
+	if (CIDR(d->cidr) == SET_HOST_MASK(set->family))
 		return type_pf_ttest_cidrs(set, d, timeout);
 #endif
 	key = HKEY(d, h->initval, t->htable_bits);
 	n = hbucket(t, key);
 	for (i = 0; i < n->pos; i++) {
 		data = ahash_tdata(n, i);
-		if (type_pf_data_equal(data, d, &multi))
-			return !type_pf_data_expired(data);
+		if (type_pf_data_equal(data, d, &multi) &&
+		    !type_pf_data_expired(data))
+			return type_pf_data_match(data);
 	}
 	return 0;
 }
@@ -1067,7 +1170,7 @@ type_pf_gc(unsigned long ul_set)
 
 	pr_debug("called\n");
 	write_lock_bh(&set->lock);
-	type_pf_expire(h);
+	type_pf_expire(h, NETS_LENGTH(set->family));
 	write_unlock_bh(&set->lock);
 
 	h->gc.expires = jiffies + IPSET_GC_PERIOD(h->timeout) * HZ;
@@ -1094,14 +1197,18 @@ type_pf_gc_init(struct ip_set *set)
 #undef type_pf_data_isnull
 #undef type_pf_data_copy
 #undef type_pf_data_zero_out
+#undef type_pf_data_netmask
 #undef type_pf_data_list
 #undef type_pf_data_tlist
+#undef type_pf_data_next
+#undef type_pf_data_flags
+#undef type_pf_data_reset_flags
+#undef type_pf_data_match
 
 #undef type_pf_elem
 #undef type_pf_telem
 #undef type_pf_data_timeout
 #undef type_pf_data_expired
-#undef type_pf_data_netmask
 #undef type_pf_data_timeout_set
 
 #undef type_pf_elem_add
@@ -1111,6 +1218,7 @@ type_pf_gc_init(struct ip_set *set)
 #undef type_pf_test
 
 #undef type_pf_elem_tadd
+#undef type_pf_del_telem
 #undef type_pf_expire
 #undef type_pf_tadd
 #undef type_pf_tdel

@@ -42,7 +42,6 @@
 #include <linux/usb/gadget.h>
 
 #include <asm/byteorder.h>
-#include <asm/system.h>
 #include <asm/unaligned.h>
 
 #include "net2272.h"
@@ -60,7 +59,7 @@ static const char * const ep_name[] = {
 };
 
 #define DMA_ADDR_INVALID	(~(dma_addr_t)0)
-#ifdef CONFIG_USB_GADGET_NET2272_DMA
+#ifdef CONFIG_USB_NET2272_DMA
 /*
  * use_dma: the NET2272 can use an external DMA controller.
  * Note that since there is no generic DMA api, some functions,
@@ -69,7 +68,7 @@ static const char * const ep_name[] = {
  *
  * If use_dma is disabled, pio will be used instead.
  */
-static int use_dma = 0;
+static bool use_dma = 0;
 module_param(use_dma, bool, 0644);
 
 /*
@@ -385,12 +384,9 @@ net2272_done(struct net2272_ep *ep, struct net2272_request *req, int status)
 		status = req->req.status;
 
 	dev = ep->dev;
-	if (use_dma && req->mapped) {
-		dma_unmap_single(dev->dev, req->req.dma, req->req.length,
-			ep->is_in ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-		req->req.dma = DMA_ADDR_INVALID;
-		req->mapped = 0;
-	}
+	if (use_dma && ep->dma)
+		usb_gadget_unmap_request(&dev->gadget, &req->req,
+				ep->is_in);
 
 	if (status && status != -ESHUTDOWN)
 		dev_vdbg(dev->dev, "complete %s req %p stat %d len %u/%u buf %p\n",
@@ -850,10 +846,11 @@ net2272_queue(struct usb_ep *_ep, struct usb_request *_req, gfp_t gfp_flags)
 		return -ESHUTDOWN;
 
 	/* set up dma mapping in case the caller didn't */
-	if (use_dma && ep->dma && _req->dma == DMA_ADDR_INVALID) {
-		_req->dma = dma_map_single(dev->dev, _req->buf, _req->length,
-			ep->is_in ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-		req->mapped = 1;
+	if (use_dma && ep->dma) {
+		status = usb_gadget_map_request(&dev->gadget, _req,
+				ep->is_in);
+		if (status)
+			return status;
 	}
 
 	dev_vdbg(dev->dev, "%s queue req %p, len %d buf %p dma %08llx %s\n",
@@ -1459,7 +1456,7 @@ static int net2272_start(struct usb_gadget *_gadget,
 	unsigned i;
 
 	if (!driver || !driver->unbind || !driver->setup ||
-	    driver->speed != USB_SPEED_HIGH)
+	    driver->max_speed != USB_SPEED_HIGH)
 		return -EINVAL;
 
 	dev = container_of(_gadget, struct net2272, gadget);
@@ -1497,6 +1494,13 @@ stop_activity(struct net2272 *dev, struct usb_gadget_driver *driver)
 	net2272_usb_reset(dev);
 	for (i = 0; i < 4; ++i)
 		net2272_dequeue_all(&dev->ep[i]);
+
+	/* report disconnect; the driver is already quiesced */
+	if (driver) {
+		spin_unlock(&dev->lock);
+		driver->disconnect(&dev->gadget);
+		spin_lock(&dev->lock);
+	}
 
 	net2272_usb_reinit(dev);
 }
@@ -2072,8 +2076,10 @@ static irqreturn_t net2272_irq(int irq, void *_dev)
 #if defined(PLX_PCI_RDK2)
 	/* see if PCI int for us by checking irqstat */
 	intcsr = readl(dev->rdk2.fpga_base_addr + RDK2_IRQSTAT);
-	if (!intcsr & (1 << NET2272_PCI_IRQ))
+	if (!intcsr & (1 << NET2272_PCI_IRQ)) {
+		spin_unlock(&dev->lock);
 		return IRQ_NONE;
+	}
 	/* check dma interrupts */
 #endif
 	/* Platform/devcice interrupt handler */
@@ -2194,7 +2200,7 @@ net2272_gadget_release(struct device *_dev)
 
 /*---------------------------------------------------------------------------*/
 
-static void __devexit
+static void
 net2272_remove(struct net2272 *dev)
 {
 	usb_del_gadget_udc(&dev->gadget);
@@ -2216,8 +2222,7 @@ net2272_remove(struct net2272 *dev)
 	dev_info(dev->dev, "unbind\n");
 }
 
-static struct net2272 * __devinit
-net2272_probe_init(struct device *dev, unsigned int irq)
+static struct net2272 *net2272_probe_init(struct device *dev, unsigned int irq)
 {
 	struct net2272 *ret;
 
@@ -2235,7 +2240,7 @@ net2272_probe_init(struct device *dev, unsigned int irq)
 	ret->irq = irq;
 	ret->dev = dev;
 	ret->gadget.ops = &net2272_ops;
-	ret->gadget.is_dualspeed = 1;
+	ret->gadget.max_speed = USB_SPEED_HIGH;
 
 	/* the "gadget" abstracts/virtualizes the controller */
 	dev_set_name(&ret->gadget.dev, "gadget");
@@ -2247,7 +2252,7 @@ net2272_probe_init(struct device *dev, unsigned int irq)
 	return ret;
 }
 
-static int __devinit
+static int
 net2272_probe_fin(struct net2272 *dev, unsigned int irqflags)
 {
 	int ret;
@@ -2307,7 +2312,7 @@ err_add_udc:
  * don't respond over USB until a gadget driver binds to us
  */
 
-static int __devinit
+static int
 net2272_rdk1_probe(struct pci_dev *pdev, struct net2272 *dev)
 {
 	unsigned long resource, len, tmp;
@@ -2390,7 +2395,7 @@ net2272_rdk1_probe(struct pci_dev *pdev, struct net2272 *dev)
 	return ret;
 }
 
-static int __devinit
+static int
 net2272_rdk2_probe(struct pci_dev *pdev, struct net2272 *dev)
 {
 	unsigned long resource, len;
@@ -2448,7 +2453,7 @@ net2272_rdk2_probe(struct pci_dev *pdev, struct net2272 *dev)
 	return ret;
 }
 
-static int __devinit
+static int
 net2272_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct net2272 *dev;
@@ -2490,7 +2495,7 @@ net2272_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	return ret;
 }
 
-static void __devexit
+static void
 net2272_rdk1_remove(struct pci_dev *pdev, struct net2272 *dev)
 {
 	int i;
@@ -2512,7 +2517,7 @@ net2272_rdk1_remove(struct pci_dev *pdev, struct net2272 *dev)
 	}
 }
 
-static void __devexit
+static void
 net2272_rdk2_remove(struct pci_dev *pdev, struct net2272 *dev)
 {
 	int i;
@@ -2531,7 +2536,7 @@ net2272_rdk2_remove(struct pci_dev *pdev, struct net2272 *dev)
 			pci_resource_len(pdev, i));
 }
 
-static void __devexit
+static void
 net2272_pci_remove(struct pci_dev *pdev)
 {
 	struct net2272 *dev = pci_get_drvdata(pdev);
@@ -2550,7 +2555,7 @@ net2272_pci_remove(struct pci_dev *pdev)
 }
 
 /* Table of matching PCI IDs */
-static struct pci_device_id __devinitdata pci_ids[] = {
+static struct pci_device_id pci_ids[] = {
 	{	/* RDK 1 card */
 		.class       = ((PCI_CLASS_BRIDGE_OTHER << 8) | 0xfe),
 		.class_mask  = 0,
@@ -2576,7 +2581,7 @@ static struct pci_driver net2272_pci_driver = {
 	.id_table = pci_ids,
 
 	.probe    = net2272_pci_probe,
-	.remove   = __devexit_p(net2272_pci_remove),
+	.remove   = net2272_pci_remove,
 };
 
 static int net2272_pci_register(void)
@@ -2596,7 +2601,7 @@ static inline void net2272_pci_unregister(void) { }
 
 /*---------------------------------------------------------------------------*/
 
-static int __devinit
+static int
 net2272_plat_probe(struct platform_device *pdev)
 {
 	struct net2272 *dev;
@@ -2662,7 +2667,7 @@ net2272_plat_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static int __devexit
+static int
 net2272_plat_remove(struct platform_device *pdev)
 {
 	struct net2272 *dev = platform_get_drvdata(pdev);
@@ -2679,7 +2684,7 @@ net2272_plat_remove(struct platform_device *pdev)
 
 static struct platform_driver net2272_plat_driver = {
 	.probe   = net2272_plat_probe,
-	.remove  = __devexit_p(net2272_plat_remove),
+	.remove  = net2272_plat_remove,
 	.driver  = {
 		.name  = driver_name,
 		.owner = THIS_MODULE,

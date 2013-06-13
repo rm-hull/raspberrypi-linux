@@ -316,11 +316,8 @@ pxa3xx_gcu_wait_idle(struct pxa3xx_gcu_priv *priv)
 		ret = wait_event_interruptible_timeout(priv->wait_idle,
 					!priv->shared->hw_running, HZ*4);
 
-		if (ret < 0)
+		if (ret != 0)
 			break;
-
-		if (ret > 0)
-			continue;
 
 		if (gc_readl(priv, REG_GCRBEXHR) == rbexhr &&
 		    priv->shared->num_interrupts == num) {
@@ -577,8 +574,7 @@ free_buffers(struct platform_device *dev,
 	priv->free = NULL;
 }
 
-static int __devinit
-pxa3xx_gcu_probe(struct platform_device *dev)
+static int pxa3xx_gcu_probe(struct platform_device *dev)
 {
 	int i, ret, irq;
 	struct resource *r;
@@ -717,8 +713,7 @@ err_free_priv:
 	return ret;
 }
 
-static int __devexit
-pxa3xx_gcu_remove(struct platform_device *dev)
+static int pxa3xx_gcu_remove(struct platform_device *dev)
 {
 	struct pxa3xx_gcu_priv *priv = platform_get_drvdata(dev);
 	struct resource *r = priv->resource_mem;
@@ -740,27 +735,14 @@ pxa3xx_gcu_remove(struct platform_device *dev)
 
 static struct platform_driver pxa3xx_gcu_driver = {
 	.probe	  = pxa3xx_gcu_probe,
-	.remove	 = __devexit_p(pxa3xx_gcu_remove),
+	.remove	 = pxa3xx_gcu_remove,
 	.driver	 = {
 		.owner  = THIS_MODULE,
 		.name   = DRV_NAME,
 	},
 };
 
-static int __init
-pxa3xx_gcu_init(void)
-{
-	return platform_driver_register(&pxa3xx_gcu_driver);
-}
-
-static void __exit
-pxa3xx_gcu_exit(void)
-{
-	platform_driver_unregister(&pxa3xx_gcu_driver);
-}
-
-module_init(pxa3xx_gcu_init);
-module_exit(pxa3xx_gcu_exit);
+module_platform_driver(pxa3xx_gcu_driver);
 
 MODULE_DESCRIPTION("PXA3xx graphics controller unit driver");
 MODULE_LICENSE("GPL");

@@ -179,7 +179,7 @@ static irqreturn_t max8903_fault(int irq, void *_data)
 	return IRQ_HANDLED;
 }
 
-static __devinit int max8903_probe(struct platform_device *pdev)
+static int max8903_probe(struct platform_device *pdev)
 {
 	struct max8903_data *data;
 	struct device *dev = &pdev->dev;
@@ -345,7 +345,7 @@ err:
 	return ret;
 }
 
-static __devexit int max8903_remove(struct platform_device *pdev)
+static int max8903_remove(struct platform_device *pdev)
 {
 	struct max8903_data *data = platform_get_drvdata(pdev);
 
@@ -367,26 +367,16 @@ static __devexit int max8903_remove(struct platform_device *pdev)
 
 static struct platform_driver max8903_driver = {
 	.probe	= max8903_probe,
-	.remove	= __devexit_p(max8903_remove),
+	.remove	= max8903_remove,
 	.driver = {
 		.name	= "max8903-charger",
 		.owner	= THIS_MODULE,
 	},
 };
 
-static int __init max8903_init(void)
-{
-	return platform_driver_register(&max8903_driver);
-}
-module_init(max8903_init);
-
-static void __exit max8903_exit(void)
-{
-	platform_driver_unregister(&max8903_driver);
-}
-module_exit(max8903_exit);
+module_platform_driver(max8903_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("MAX8903 Charger Driver");
 MODULE_AUTHOR("MyungJoo Ham <myungjoo.ham@samsung.com>");
-MODULE_ALIAS("max8903-charger");
+MODULE_ALIAS("platform:max8903-charger");

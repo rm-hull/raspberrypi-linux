@@ -467,23 +467,15 @@ void DoCMilPlus_init(struct mtd_info *mtd)
 
 	mtd->type = MTD_NANDFLASH;
 	mtd->flags = MTD_CAP_NANDFLASH;
-	mtd->size = 0;
-
-	mtd->erasesize = 0;
-	mtd->writesize = 512;
+	mtd->writebufsize = mtd->writesize = 512;
 	mtd->oobsize = 16;
+	mtd->ecc_strength = 2;
 	mtd->owner = THIS_MODULE;
-	mtd->erase = doc_erase;
-	mtd->point = NULL;
-	mtd->unpoint = NULL;
-	mtd->read = doc_read;
-	mtd->write = doc_write;
-	mtd->read_oob = doc_read_oob;
-	mtd->write_oob = doc_write_oob;
-	mtd->sync = NULL;
-
-	this->totlen = 0;
-	this->numchips = 0;
+	mtd->_erase = doc_erase;
+	mtd->_read = doc_read;
+	mtd->_write = doc_write;
+	mtd->_read_oob = doc_read_oob;
+	mtd->_write_oob = doc_write_oob;
 	this->curfloor = -1;
 	this->curchip = -1;
 
@@ -590,10 +582,6 @@ static int doc_read(struct mtd_info *mtd, loff_t from, size_t len,
 	void __iomem * docptr = this->virtadr;
 	struct Nand *mychip = &this->chips[from >> (this->chipshift)];
 
-	/* Don't allow read past end of device */
-	if (from >= this->totlen)
-		return -EINVAL;
-
 	/* Don't allow a single read to cross a 512-byte block boundary */
 	if (from + len > ((from | 0x1ff) + 1))
 		len = ((from | 0x1ff) + 1) - from;
@@ -671,23 +659,15 @@ static int doc_read(struct mtd_info *mtd, loff_t from, size_t len,
 #ifdef ECC_DEBUG
 			printk("%s(%d): Millennium Plus ECC error (from=0x%x:\n",
 				__FILE__, __LINE__, (int)from);
-			printk("        syndrome= %02x:%02x:%02x:%02x:%02x:"
-				"%02x\n",
-				syndrome[0], syndrome[1], syndrome[2],
-				syndrome[3], syndrome[4], syndrome[5]);
-			printk("          eccbuf= %02x:%02x:%02x:%02x:%02x:"
-				"%02x\n",
-				eccbuf[0], eccbuf[1], eccbuf[2],
-				eccbuf[3], eccbuf[4], eccbuf[5]);
+			printk("        syndrome= %*phC\n", 6, syndrome);
+			printk("        eccbuf= %*phC\n", 6, eccbuf);
 #endif
 				ret = -EIO;
 		}
 	}
 
 #ifdef PSYCHO_DEBUG
-	printk("ECC DATA at %lx: %2.2X %2.2X %2.2X %2.2X %2.2X %2.2X\n",
-	       (long)from, eccbuf[0], eccbuf[1], eccbuf[2], eccbuf[3],
-	       eccbuf[4], eccbuf[5]);
+	printk("ECC DATA at %lx: %*ph\n", (long)from, 6, eccbuf);
 #endif
 	/* disable the ECC engine */
 	WriteDOC(DOC_ECC_DIS, docptr , Mplus_ECCConf);
@@ -708,10 +688,6 @@ static int doc_write(struct mtd_info *mtd, loff_t to, size_t len,
 	struct DiskOnChip *this = mtd->priv;
 	void __iomem * docptr = this->virtadr;
 	struct Nand *mychip = &this->chips[to >> (this->chipshift)];
-
-	/* Don't allow write past end of device */
-	if (to >= this->totlen)
-		return -EINVAL;
 
 	/* Don't allow writes which aren't exactly one block (512 bytes) */
 	if ((to & 0x1ff) || (len != 0x200))
@@ -809,7 +785,6 @@ static int doc_write(struct mtd_info *mtd, loff_t to, size_t len,
 		printk("MTD: Error 0x%x programming at 0x%x\n", dummy, (int)to);
 		/* Error in programming
 		   FIXME: implement Bad Block Replacement (in nftl.c ??) */
-		*retlen = 0;
 		ret = -EIO;
 	}
 	dummy = ReadDOC(docptr, Mplus_LastDataRead);

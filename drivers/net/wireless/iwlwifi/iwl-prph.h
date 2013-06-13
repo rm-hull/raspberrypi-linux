@@ -5,7 +5,7 @@
  *
  * GPL LICENSE SUMMARY
  *
- * Copyright(c) 2005 - 2011 Intel Corporation. All rights reserved.
+ * Copyright(c) 2005 - 2013 Intel Corporation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of version 2 of the GNU General Public License as
@@ -30,7 +30,7 @@
  *
  * BSD LICENSE
  *
- * Copyright(c) 2005 - 2011 Intel Corporation. All rights reserved.
+ * Copyright(c) 2005 - 2013 Intel Corporation. All rights reserved.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -96,6 +96,9 @@
 #define APMG_SVR_DIGITAL_VOLTAGE_1_32		(0x00000060)
 
 #define APMG_PCIDEV_STT_VAL_L1_ACT_DIS		(0x00000800)
+
+/* Device system time */
+#define DEVICE_SYSTEM_TIME_REG 0xA0206C
 
 /**
  * Tx Scheduler
@@ -187,7 +190,7 @@
 #define SCD_QUEUE_STTS_REG_POS_ACTIVE	(3)
 #define SCD_QUEUE_STTS_REG_POS_WSL	(4)
 #define SCD_QUEUE_STTS_REG_POS_SCD_ACT_EN (19)
-#define SCD_QUEUE_STTS_REG_MSK		(0x00FF0000)
+#define SCD_QUEUE_STTS_REG_MSK		(0x017F0000)
 
 #define SCD_QUEUE_CTX_REG1_CREDIT_POS		(8)
 #define SCD_QUEUE_CTX_REG1_CREDIT_MSK		(0x00FFFF00)
@@ -213,12 +216,11 @@
 #define SCD_CONTEXT_QUEUE_OFFSET(x)\
 	(SCD_CONTEXT_MEM_LOWER_BOUND + ((x) * 8))
 
+#define SCD_TX_STTS_QUEUE_OFFSET(x)\
+	(SCD_TX_STTS_MEM_LOWER_BOUND + ((x) * 16))
+
 #define SCD_TRANS_TBL_OFFSET_QUEUE(x) \
 	((SCD_TRANS_TBL_MEM_LOWER_BOUND + ((x) * 2)) & 0xfffc)
-
-#define SCD_QUEUECHAIN_SEL_ALL(priv)	\
-	(((1<<hw_params(priv).max_txq_num) - 1) &\
-	(~(1<<(priv)->shrd->cmd_queue)))
 
 #define SCD_BASE			(PRPH_BASE + 0xa02c00)
 
@@ -227,12 +229,34 @@
 #define SCD_AIT			(SCD_BASE + 0x0c)
 #define SCD_TXFACT		(SCD_BASE + 0x10)
 #define SCD_ACTIVE		(SCD_BASE + 0x14)
-#define SCD_QUEUE_WRPTR(x)	(SCD_BASE + 0x18 + (x) * 4)
-#define SCD_QUEUE_RDPTR(x)	(SCD_BASE + 0x68 + (x) * 4)
 #define SCD_QUEUECHAIN_SEL	(SCD_BASE + 0xe8)
+#define SCD_CHAINEXT_EN		(SCD_BASE + 0x244)
 #define SCD_AGGR_SEL		(SCD_BASE + 0x248)
 #define SCD_INTERRUPT_MASK	(SCD_BASE + 0x108)
-#define SCD_QUEUE_STATUS_BITS(x)	(SCD_BASE + 0x10c + (x) * 4)
+
+static inline unsigned int SCD_QUEUE_WRPTR(unsigned int chnl)
+{
+	if (chnl < 20)
+		return SCD_BASE + 0x18 + chnl * 4;
+	WARN_ON_ONCE(chnl >= 32);
+	return SCD_BASE + 0x284 + (chnl - 20) * 4;
+}
+
+static inline unsigned int SCD_QUEUE_RDPTR(unsigned int chnl)
+{
+	if (chnl < 20)
+		return SCD_BASE + 0x68 + chnl * 4;
+	WARN_ON_ONCE(chnl >= 32);
+	return SCD_BASE + 0x2B4 + (chnl - 20) * 4;
+}
+
+static inline unsigned int SCD_QUEUE_STATUS_BITS(unsigned int chnl)
+{
+	if (chnl < 20)
+		return SCD_BASE + 0x10c + chnl * 4;
+	WARN_ON_ONCE(chnl >= 32);
+	return SCD_BASE + 0x384 + (chnl - 20) * 4;
+}
 
 /*********************** END TX SCHEDULER *************************************/
 

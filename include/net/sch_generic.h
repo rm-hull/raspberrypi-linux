@@ -50,6 +50,13 @@ struct Qdisc {
 #define TCQ_F_INGRESS		2
 #define TCQ_F_CAN_BYPASS	4
 #define TCQ_F_MQROOT		8
+#define TCQ_F_ONETXQUEUE	0x10 /* dequeue_skb() can assume all skbs are for
+				      * q->dev_queue : It can test
+				      * netif_xmit_frozen_or_stopped() before
+				      * dequeueing next packet.
+				      * Its true for MQ/MQPRIO slaves, or non
+				      * multiqueue device.
+				      */
 #define TCQ_F_WARN_NONWC	(1 << 16)
 	int			padded;
 	const struct Qdisc_ops	*ops;
@@ -188,7 +195,8 @@ struct tcf_proto_ops {
 
 	unsigned long		(*get)(struct tcf_proto*, u32 handle);
 	void			(*put)(struct tcf_proto*, unsigned long);
-	int			(*change)(struct tcf_proto*, unsigned long,
+	int			(*change)(struct net *net, struct sk_buff *,
+					struct tcf_proto*, unsigned long,
 					u32 handle, struct nlattr **,
 					unsigned long *);
 	int			(*delete)(struct tcf_proto*, unsigned long);
@@ -220,8 +228,18 @@ struct tcf_proto {
 
 struct qdisc_skb_cb {
 	unsigned int		pkt_len;
-	long			data[];
+	u16			slave_dev_queue_mapping;
+	u16			_pad;
+	unsigned char		data[20];
 };
+
+static inline void qdisc_cb_private_validate(const struct sk_buff *skb, int sz)
+{
+	struct qdisc_skb_cb *qcb;
+
+	BUILD_BUG_ON(sizeof(skb->cb) < offsetof(struct qdisc_skb_cb, data) + sz);
+	BUILD_BUG_ON(sizeof(qcb->data) < sz);
+}
 
 static inline int qdisc_qlen(const struct Qdisc *q)
 {
@@ -321,11 +339,10 @@ static inline struct Qdisc_class_common *
 qdisc_class_find(const struct Qdisc_class_hash *hash, u32 id)
 {
 	struct Qdisc_class_common *cl;
-	struct hlist_node *n;
 	unsigned int h;
 
 	h = qdisc_class_hash(id, hash->hashmask);
-	hlist_for_each_entry(cl, n, &hash->hash[h], hnode) {
+	hlist_for_each_entry(cl, &hash->hash[h], hnode) {
 		if (cl->classid == id)
 			return cl;
 	}
@@ -660,5 +677,24 @@ static inline struct sk_buff *skb_act_clone(struct sk_buff *skb, gfp_t gfp_mask,
 	return n;
 }
 #endif
+
+struct psched_ratecfg {
+	u64 rate_bps;
+	u32 mult;
+	u32 shift;
+};
+
+static inline u64 psched_l2t_ns(const struct psched_ratecfg *r,
+				unsigned int len)
+{
+	return ((u64)len * r->mult) >> r->shift;
+}
+
+extern void psched_ratecfg_precompute(struct psched_ratecfg *r, u32 rate);
+
+static inline u32 psched_ratecfg_getrate(const struct psched_ratecfg *r)
+{
+	return r->rate_bps >> 3;
+}
 
 #endif

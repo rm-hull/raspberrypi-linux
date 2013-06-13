@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2004-2011 Emulex.  All rights reserved.           *
+ * Copyright (C) 2004-2012 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
  * www.emulex.com                                                  *
  * Portions Copyright (C) 2004-2005 Christoph Hellwig              *
@@ -26,6 +26,8 @@
 #endif
 
 struct lpfc_sli2_slim;
+
+#define ELX_MODEL_NAME_SIZE	80
 
 #define LPFC_PCI_DEV_LP		0x1
 #define LPFC_PCI_DEV_OC		0x2
@@ -73,6 +75,8 @@ struct lpfc_sli2_slim;
 #define LPFC_HB_MBOX_INTERVAL   5	/* Heart beat interval in seconds. */
 #define LPFC_HB_MBOX_TIMEOUT    30	/* Heart beat timeout  in seconds. */
 
+#define LPFC_LOOK_AHEAD_OFF	0	/* Look ahead logic is turned off */
+
 /* Error Attention event polling interval */
 #define LPFC_ERATT_POLL_INTERVAL	5 /* EATT poll interval in seconds */
 
@@ -92,6 +96,13 @@ struct lpfc_sli2_slim;
 
 /* lpfc wait event data ready flag */
 #define LPFC_DATA_READY		(1<<0)
+
+/* queue dump line buffer size */
+#define LPFC_LBUF_SZ		128
+
+/* mailbox system shutdown options */
+#define LPFC_MBX_NO_WAIT	0
+#define LPFC_MBX_WAIT		1
 
 enum lpfc_polling_flags {
 	ENABLE_FCP_RING_POLLING = 0x1,
@@ -245,18 +256,6 @@ struct lpfc_stats {
 	uint32_t fcpPortBusy;
 	uint32_t fcpError;
 	uint32_t fcpLocalErr;
-};
-
-enum sysfs_mbox_state {
-	SMBOX_IDLE,
-	SMBOX_WRITING,
-	SMBOX_READING
-};
-
-struct lpfc_sysfs_mbox {
-	enum sysfs_mbox_state state;
-	size_t                offset;
-	struct lpfcMboxq *    mbox;
 };
 
 struct lpfc_hba;
@@ -467,11 +466,13 @@ enum intr_type_t {
 	MSIX,
 };
 
+#define LPFC_CT_CTX_MAX		64
 struct unsol_rcv_ct_ctx {
 	uint32_t ctxt_id;
 	uint32_t SID;
-	uint32_t flags;
-#define UNSOL_VALID	0x00000001
+	uint32_t valid;
+#define UNSOL_INVALID		0
+#define UNSOL_VALID		1
 	uint16_t oxid;
 	uint16_t rxid;
 };
@@ -546,6 +547,7 @@ struct lpfc_hba {
 	void (*lpfc_scsi_prep_cmnd)
 		(struct lpfc_vport *, struct lpfc_scsi_buf *,
 		 struct lpfc_nodelist *);
+
 	/* IOCB interface function jump table entries */
 	int (*__lpfc_sli_issue_iocb)
 		(struct lpfc_hba *, uint32_t,
@@ -553,8 +555,6 @@ struct lpfc_hba {
 	void (*__lpfc_sli_release_iocbq)(struct lpfc_hba *,
 			 struct lpfc_iocbq *);
 	int (*lpfc_hba_down_post)(struct lpfc_hba *phba);
-
-
 	IOCB_t * (*lpfc_get_iocb_from_iocbq)
 		(struct lpfc_iocbq *);
 	void (*lpfc_scsi_cmd_iocb_cmpl)
@@ -563,10 +563,12 @@ struct lpfc_hba {
 	/* MBOX interface function jump table entries */
 	int (*lpfc_sli_issue_mbox)
 		(struct lpfc_hba *, LPFC_MBOXQ_t *, uint32_t);
+
 	/* Slow-path IOCB process function jump table entries */
 	void (*lpfc_sli_handle_slow_ring_event)
 		(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 		 uint32_t mask);
+
 	/* INIT device interface function jump table entries */
 	int (*lpfc_sli_hbq_to_firmware)
 		(struct lpfc_hba *, uint32_t, struct hbq_dmabuf *);
@@ -584,6 +586,10 @@ struct lpfc_hba {
 		(struct lpfc_hba *, uint32_t);
 	int (*lpfc_selective_reset)
 		(struct lpfc_hba *);
+
+	int (*lpfc_bg_scsi_prep_dma_buf)
+		(struct lpfc_hba *, struct lpfc_scsi_buf *);
+	/* Add new entries here */
 
 	/* SLI4 specific HBA data structure */
 	struct lpfc_sli4_hba sli4_hba;
@@ -627,6 +633,7 @@ struct lpfc_hba {
 #define HBA_AER_ENABLED		0x1000 /* AER enabled with HBA */
 #define HBA_DEVLOSS_TMO         0x2000 /* HBA in devloss timeout */
 #define HBA_RRQ_ACTIVE		0x4000 /* process the rrq active list */
+#define HBA_FCP_IOQ_FLUSH	0x8000 /* FCP I/O queues being flushed */
 	uint32_t fcp_ring_in_use; /* When polling test if intr-hndlr active*/
 	struct lpfc_dmabuf slim2p;
 
@@ -683,6 +690,8 @@ struct lpfc_hba {
 #define LPFC_FCF_FOV 1		/* Fast fcf failover */
 #define LPFC_FCF_PRIORITY 2	/* Priority fcf failover */
 	uint32_t cfg_fcf_failover_policy;
+	uint32_t cfg_fcp_io_sched;
+	uint32_t cfg_fcp2_no_tgt_reset;
 	uint32_t cfg_cr_delay;
 	uint32_t cfg_cr_count;
 	uint32_t cfg_multi_ring_support;
@@ -694,6 +703,7 @@ struct lpfc_hba {
 	uint32_t cfg_fcp_imax;
 	uint32_t cfg_fcp_wq_count;
 	uint32_t cfg_fcp_eq_count;
+	uint32_t cfg_fcp_io_channel;
 	uint32_t cfg_sg_seg_cnt;
 	uint32_t cfg_prot_sg_seg_cnt;
 	uint32_t cfg_sg_dma_buf_size;
@@ -707,6 +717,7 @@ struct lpfc_hba {
 	uint32_t cfg_log_verbose;
 	uint32_t cfg_aer_support;
 	uint32_t cfg_sriov_nr_virtfn;
+	uint32_t cfg_request_firmware_upgrade;
 	uint32_t cfg_iocb_cnt;
 	uint32_t cfg_suppress_link_up;
 #define LPFC_INITIALIZE_LINK              0	/* do normal init_link mbox */
@@ -731,7 +742,7 @@ struct lpfc_hba {
 	uint32_t hbq_count;	        /* Count of configured HBQs */
 	struct hbq_s hbqs[LPFC_MAX_HBQS]; /* local copy of hbq indicies  */
 
-	uint32_t fcp_qidx;		/* next work queue to post work to */
+	atomic_t fcp_qidx;		/* next work queue to post work to */
 
 	unsigned long pci_bar0_map;     /* Physical address for PCI BAR0 */
 	unsigned long pci_bar1_map;     /* Physical address for PCI BAR1 */
@@ -741,6 +752,15 @@ struct lpfc_hba {
 	void __iomem *ctrl_regs_memmap_p;/* Kernel memory mapped address for
 					    PCI BAR2 */
 
+	void __iomem *pci_bar0_memmap_p; /* Kernel memory mapped address for
+					    PCI BAR0 with dual-ULP support */
+	void __iomem *pci_bar2_memmap_p; /* Kernel memory mapped address for
+					    PCI BAR2 with dual-ULP support */
+	void __iomem *pci_bar4_memmap_p; /* Kernel memory mapped address for
+					    PCI BAR4 with dual-ULP support */
+#define PCI_64BIT_BAR0	0
+#define PCI_64BIT_BAR2	2
+#define PCI_64BIT_BAR4	4
 	void __iomem *MBslimaddr;	/* virtual address for mbox cmds */
 	void __iomem *HAregaddr;	/* virtual address for host attn reg */
 	void __iomem *CAregaddr;	/* virtual address for chip attn reg */
@@ -782,8 +802,6 @@ struct lpfc_hba {
 	uint64_t bg_guard_err_cnt;
 	uint64_t bg_apptag_err_cnt;
 	uint64_t bg_reftag_err_cnt;
-
-	struct lpfc_sysfs_mbox sysfs_mbox;
 
 	/* fastpath list. */
 	spinlock_t scsi_buf_list_lock;
@@ -849,9 +867,12 @@ struct lpfc_hba {
 	struct dentry *debug_dumpData;   /* BlockGuard BPL */
 	struct dentry *debug_dumpDif;    /* BlockGuard BPL */
 	struct dentry *debug_InjErrLBA;  /* LBA to inject errors at */
+	struct dentry *debug_InjErrNPortID;  /* NPortID to inject errors at */
+	struct dentry *debug_InjErrWWPN;  /* WWPN to inject errors at */
 	struct dentry *debug_writeGuard; /* inject write guard_tag errors */
 	struct dentry *debug_writeApp;   /* inject write app_tag errors */
 	struct dentry *debug_writeRef;   /* inject write ref_tag errors */
+	struct dentry *debug_readGuard;  /* inject read guard_tag errors */
 	struct dentry *debug_readApp;    /* inject read app_tag errors */
 	struct dentry *debug_readRef;    /* inject read ref_tag errors */
 
@@ -859,10 +880,13 @@ struct lpfc_hba {
 	uint32_t lpfc_injerr_wgrd_cnt;
 	uint32_t lpfc_injerr_wapp_cnt;
 	uint32_t lpfc_injerr_wref_cnt;
+	uint32_t lpfc_injerr_rgrd_cnt;
 	uint32_t lpfc_injerr_rapp_cnt;
 	uint32_t lpfc_injerr_rref_cnt;
+	uint32_t lpfc_injerr_nportid;
+	struct lpfc_name lpfc_injerr_wwpn;
 	sector_t lpfc_injerr_lba;
-#define LPFC_INJERR_LBA_OFF	(sector_t)0xffffffffffffffff
+#define LPFC_INJERR_LBA_OFF	(sector_t)(-1)
 
 	struct dentry *debug_slow_ring_trc;
 	struct lpfc_debugfs_trc *slow_ring_trc;
@@ -915,6 +939,8 @@ struct lpfc_hba {
 	atomic_t fast_event_count;
 	uint32_t fcoe_eventtag;
 	uint32_t fcoe_eventtag_at_fcf_scan;
+	uint32_t fcoe_cvl_eventtag;
+	uint32_t fcoe_cvl_eventtag_attn;
 	struct lpfc_fcf fcf;
 	uint8_t fc_map[3];
 	uint8_t valid_vlan;
@@ -923,7 +949,7 @@ struct lpfc_hba {
 
 	spinlock_t ct_ev_lock; /* synchronize access to ct_ev_waiters */
 	struct list_head ct_ev_waiters;
-	struct unsol_rcv_ct_ctx ct_ctx[64];
+	struct unsol_rcv_ct_ctx ct_ctx[LPFC_CT_CTX_MAX];
 	uint32_t ctx_idx;
 
 	uint8_t menlo_flag;	/* menlo generic flags */

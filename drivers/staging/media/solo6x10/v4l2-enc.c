@@ -26,7 +26,7 @@
 #include <media/videobuf-dma-sg.h>
 #include "solo6x10.h"
 #include "tw28.h"
-#include "jpeg.h"
+#include "solo6x10-jpeg.h"
 
 #define MIN_VID_BUFFERS		4
 #define FRAME_BUF_SIZE		(128 * 1024)
@@ -1619,6 +1619,8 @@ static int solo_s_ext_ctrls(struct file *file, void *priv,
 				solo_enc->osd_text[OSD_TEXT_MAX] = '\0';
 				if (!err)
 					err = solo_osd_print(solo_enc);
+				else
+					err = -EFAULT;
 			}
 			break;
 		default:
@@ -1654,6 +1656,8 @@ static int solo_g_ext_ctrls(struct file *file, void *priv,
 				err = copy_to_user(ctrl->string,
 						   solo_enc->osd_text,
 						   OSD_TEXT_MAX);
+				if (err)
+					err = -EFAULT;
 			}
 			break;
 		default:

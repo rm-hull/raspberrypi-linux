@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <linux/export.h>
 #include <net/mac80211.h>
+#include <asm/unaligned.h>
 #include "ieee80211_i.h"
 #include "driver-ops.h"
 #include "debugfs_key.h"
@@ -54,14 +55,6 @@ static void assert_key_lock(struct ieee80211_local *local)
 	lockdep_assert_held(&local->key_mtx);
 }
 
-static struct ieee80211_sta *get_sta_for_key(struct ieee80211_key *key)
-{
-	if (key->sta)
-		return &key->sta->sta;
-
-	return NULL;
-}
-
 static void increment_tailroom_need_count(struct ieee80211_sub_if_data *sdata)
 {
 	/*
@@ -95,7 +88,7 @@ static void increment_tailroom_need_count(struct ieee80211_sub_if_data *sdata)
 static int ieee80211_key_enable_hw_accel(struct ieee80211_key *key)
 {
 	struct ieee80211_sub_if_data *sdata;
-	struct ieee80211_sta *sta;
+	struct sta_info *sta;
 	int ret;
 
 	might_sleep();
@@ -105,7 +98,7 @@ static int ieee80211_key_enable_hw_accel(struct ieee80211_key *key)
 
 	assert_key_lock(key->local);
 
-	sta = get_sta_for_key(key);
+	sta = key->sta;
 
 	/*
 	 * If this is a per-STA GTK, check if it
@@ -113,6 +106,9 @@ static int ieee80211_key_enable_hw_accel(struct ieee80211_key *key)
 	 */
 	if (sta && !(key->conf.flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
 	    !(key->local->hw.flags & IEEE80211_HW_SUPPORTS_PER_STA_GTK))
+		goto out_unsupported;
+
+	if (sta && !sta->uploaded)
 		goto out_unsupported;
 
 	sdata = key->sdata;
@@ -123,12 +119,10 @@ static int ieee80211_key_enable_hw_accel(struct ieee80211_key *key)
 		 */
 		if (!(key->conf.flags & IEEE80211_KEY_FLAG_PAIRWISE))
 			goto out_unsupported;
-		sdata = container_of(sdata->bss,
-				     struct ieee80211_sub_if_data,
-				     u.ap);
 	}
 
-	ret = drv_set_key(key->local, SET_KEY, sdata, sta, &key->conf);
+	ret = drv_set_key(key->local, SET_KEY, sdata,
+			  sta ? &sta->sta : NULL, &key->conf);
 
 	if (!ret) {
 		key->flags |= KEY_FLAG_UPLOADED_TO_HARDWARE;
@@ -145,9 +139,10 @@ static int ieee80211_key_enable_hw_accel(struct ieee80211_key *key)
 	}
 
 	if (ret != -ENOSPC && ret != -EOPNOTSUPP)
-		wiphy_err(key->local->hw.wiphy,
+		sdata_err(sdata,
 			  "failed to set key (%d, %pM) to hardware (%d)\n",
-			  key->conf.keyidx, sta ? sta->addr : bcast_addr, ret);
+			  key->conf.keyidx,
+			  sta ? sta->sta.addr : bcast_addr, ret);
 
  out_unsupported:
 	switch (key->conf.cipher) {
@@ -166,7 +161,7 @@ static int ieee80211_key_enable_hw_accel(struct ieee80211_key *key)
 static void ieee80211_key_disable_hw_accel(struct ieee80211_key *key)
 {
 	struct ieee80211_sub_if_data *sdata;
-	struct ieee80211_sta *sta;
+	struct sta_info *sta;
 	int ret;
 
 	might_sleep();
@@ -179,7 +174,7 @@ static void ieee80211_key_disable_hw_accel(struct ieee80211_key *key)
 	if (!(key->flags & KEY_FLAG_UPLOADED_TO_HARDWARE))
 		return;
 
-	sta = get_sta_for_key(key);
+	sta = key->sta;
 	sdata = key->sdata;
 
 	if (!((key->conf.flags & IEEE80211_KEY_FLAG_GENERATE_MMIC) ||
@@ -187,41 +182,17 @@ static void ieee80211_key_disable_hw_accel(struct ieee80211_key *key)
 	      (key->conf.flags & IEEE80211_KEY_FLAG_PUT_IV_SPACE)))
 		increment_tailroom_need_count(sdata);
 
-	if (sdata->vif.type == NL80211_IFTYPE_AP_VLAN)
-		sdata = container_of(sdata->bss,
-				     struct ieee80211_sub_if_data,
-				     u.ap);
-
 	ret = drv_set_key(key->local, DISABLE_KEY, sdata,
-			  sta, &key->conf);
+			  sta ? &sta->sta : NULL, &key->conf);
 
 	if (ret)
-		wiphy_err(key->local->hw.wiphy,
+		sdata_err(sdata,
 			  "failed to remove key (%d, %pM) from hardware (%d)\n",
-			  key->conf.keyidx, sta ? sta->addr : bcast_addr, ret);
+			  key->conf.keyidx,
+			  sta ? sta->sta.addr : bcast_addr, ret);
 
 	key->flags &= ~KEY_FLAG_UPLOADED_TO_HARDWARE;
 }
-
-void ieee80211_key_removed(struct ieee80211_key_conf *key_conf)
-{
-	struct ieee80211_key *key;
-
-	key = container_of(key_conf, struct ieee80211_key, conf);
-
-	might_sleep();
-	assert_key_lock(key->local);
-
-	key->flags &= ~KEY_FLAG_UPLOADED_TO_HARDWARE;
-
-	/*
-	 * Flush TX path to avoid attempts to use this key
-	 * after this function returns. Until then, drivers
-	 * must be prepared to handle the key.
-	 */
-	synchronize_rcu();
-}
-EXPORT_SYMBOL_GPL(ieee80211_key_removed);
 
 static void __ieee80211_set_default_key(struct ieee80211_sub_if_data *sdata,
 					int idx, bool uni, bool multi)
@@ -233,8 +204,11 @@ static void __ieee80211_set_default_key(struct ieee80211_sub_if_data *sdata,
 	if (idx >= 0 && idx < NUM_DEFAULT_KEYS)
 		key = key_mtx_dereference(sdata->local, sdata->keys[idx]);
 
-	if (uni)
+	if (uni) {
 		rcu_assign_pointer(sdata->default_unicast_key, key);
+		drv_set_default_unicast_key(sdata->local, sdata, idx);
+	}
+
 	if (multi)
 		rcu_assign_pointer(sdata->default_multicast_key, key);
 
@@ -368,7 +342,7 @@ struct ieee80211_key *ieee80211_key_alloc(u32 cipher, int idx, size_t key_len,
 		key->conf.iv_len = TKIP_IV_LEN;
 		key->conf.icv_len = TKIP_ICV_LEN;
 		if (seq) {
-			for (i = 0; i < NUM_RX_DATA_QUEUES; i++) {
+			for (i = 0; i < IEEE80211_NUM_TIDS; i++) {
 				key->u.tkip.rx[i].iv32 =
 					get_unaligned_le32(&seq[2]);
 				key->u.tkip.rx[i].iv16 =
@@ -381,7 +355,7 @@ struct ieee80211_key *ieee80211_key_alloc(u32 cipher, int idx, size_t key_len,
 		key->conf.iv_len = CCMP_HDR_LEN;
 		key->conf.icv_len = CCMP_MIC_LEN;
 		if (seq) {
-			for (i = 0; i < NUM_RX_DATA_QUEUES + 1; i++)
+			for (i = 0; i < IEEE80211_NUM_TIDS + 1; i++)
 				for (j = 0; j < CCMP_PN_LEN; j++)
 					key->u.ccmp.rx_pn[i][j] =
 						seq[CCMP_PN_LEN - j - 1];
@@ -401,8 +375,9 @@ struct ieee80211_key *ieee80211_key_alloc(u32 cipher, int idx, size_t key_len,
 		key->conf.iv_len = 0;
 		key->conf.icv_len = sizeof(struct ieee80211_mmie);
 		if (seq)
-			for (j = 0; j < 6; j++)
-				key->u.aes_cmac.rx_pn[j] = seq[6 - j - 1];
+			for (j = 0; j < CMAC_PN_LEN; j++)
+				key->u.aes_cmac.rx_pn[j] =
+					seq[CMAC_PN_LEN - j - 1];
 		/*
 		 * Initialize AES key state here as an optimization so that
 		 * it does not need to be initialized for every packet.
@@ -431,7 +406,7 @@ static void __ieee80211_key_destroy(struct ieee80211_key *key)
 	 * Synchronize so the TX path can no longer be using
 	 * this key before we free/remove it.
 	 */
-	synchronize_rcu();
+	synchronize_net();
 
 	if (key->local)
 		ieee80211_key_disable_hw_accel(key);
@@ -683,16 +658,16 @@ void ieee80211_get_key_rx_seq(struct ieee80211_key_conf *keyconf,
 
 	switch (key->conf.cipher) {
 	case WLAN_CIPHER_SUITE_TKIP:
-		if (WARN_ON(tid < 0 || tid >= NUM_RX_DATA_QUEUES))
+		if (WARN_ON(tid < 0 || tid >= IEEE80211_NUM_TIDS))
 			return;
 		seq->tkip.iv32 = key->u.tkip.rx[tid].iv32;
 		seq->tkip.iv16 = key->u.tkip.rx[tid].iv16;
 		break;
 	case WLAN_CIPHER_SUITE_CCMP:
-		if (WARN_ON(tid < -1 || tid >= NUM_RX_DATA_QUEUES))
+		if (WARN_ON(tid < -1 || tid >= IEEE80211_NUM_TIDS))
 			return;
 		if (tid < 0)
-			pn = key->u.ccmp.rx_pn[NUM_RX_DATA_QUEUES];
+			pn = key->u.ccmp.rx_pn[IEEE80211_NUM_TIDS];
 		else
 			pn = key->u.ccmp.rx_pn[tid];
 		memcpy(seq->ccmp.pn, pn, CCMP_PN_LEN);

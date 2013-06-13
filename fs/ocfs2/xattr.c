@@ -623,7 +623,7 @@ int ocfs2_calc_security_init(struct inode *dir,
 
 int ocfs2_calc_xattr_init(struct inode *dir,
 			  struct buffer_head *dir_bh,
-			  int mode,
+			  umode_t mode,
 			  struct ocfs2_security_xattr_info *si,
 			  int *want_clusters,
 			  int *xattr_credits,
@@ -7189,7 +7189,7 @@ int ocfs2_init_security_and_acl(struct inode *dir,
 	struct buffer_head *dir_bh = NULL;
 
 	ret = ocfs2_init_security_get(inode, dir, qstr, NULL);
-	if (!ret) {
+	if (ret) {
 		mlog_errno(ret);
 		goto leave;
 	}

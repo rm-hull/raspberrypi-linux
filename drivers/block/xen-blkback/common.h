@@ -34,6 +34,7 @@
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <linux/io.h>
+#include <linux/rbtree.h>
 #include <asm/setup.h>
 #include <asm/pgalloc.h>
 #include <asm/hypervisor.h>
@@ -60,58 +61,81 @@ struct blkif_common_response {
 	char dummy;
 };
 
-/* i386 protocol version */
-#pragma pack(push, 4)
-
 struct blkif_x86_32_request_rw {
-	blkif_sector_t sector_number;/* start sector idx on disk (r/w only)  */
-	struct blkif_request_segment seg[BLKIF_MAX_SEGMENTS_PER_REQUEST];
-};
-
-struct blkif_x86_32_request_discard {
-	blkif_sector_t sector_number;/* start sector idx on disk (r/w only)  */
-	uint64_t nr_sectors;
-};
-
-struct blkif_x86_32_request {
-	uint8_t        operation;    /* BLKIF_OP_???                         */
 	uint8_t        nr_segments;  /* number of segments                   */
 	blkif_vdev_t   handle;       /* only for read/write requests         */
 	uint64_t       id;           /* private guest value, echoed in resp  */
+	blkif_sector_t sector_number;/* start sector idx on disk (r/w only)  */
+	struct blkif_request_segment seg[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+} __attribute__((__packed__));
+
+struct blkif_x86_32_request_discard {
+	uint8_t        flag;         /* BLKIF_DISCARD_SECURE or zero         */
+	blkif_vdev_t   _pad1;        /* was "handle" for read/write requests */
+	uint64_t       id;           /* private guest value, echoed in resp  */
+	blkif_sector_t sector_number;/* start sector idx on disk (r/w only)  */
+	uint64_t       nr_sectors;
+} __attribute__((__packed__));
+
+struct blkif_x86_32_request_other {
+	uint8_t        _pad1;
+	blkif_vdev_t   _pad2;
+	uint64_t       id;           /* private guest value, echoed in resp  */
+} __attribute__((__packed__));
+
+struct blkif_x86_32_request {
+	uint8_t        operation;    /* BLKIF_OP_???                         */
 	union {
 		struct blkif_x86_32_request_rw rw;
 		struct blkif_x86_32_request_discard discard;
+		struct blkif_x86_32_request_other other;
 	} u;
-};
+} __attribute__((__packed__));
+
+/* i386 protocol version */
+#pragma pack(push, 4)
 struct blkif_x86_32_response {
 	uint64_t        id;              /* copied from request */
 	uint8_t         operation;       /* copied from request */
 	int16_t         status;          /* BLKIF_RSP_???       */
 };
 #pragma pack(pop)
-
 /* x86_64 protocol version */
 
 struct blkif_x86_64_request_rw {
+	uint8_t        nr_segments;  /* number of segments                   */
+	blkif_vdev_t   handle;       /* only for read/write requests         */
+	uint32_t       _pad1;        /* offsetof(blkif_reqest..,u.rw.id)==8  */
+	uint64_t       id;
 	blkif_sector_t sector_number;/* start sector idx on disk (r/w only)  */
 	struct blkif_request_segment seg[BLKIF_MAX_SEGMENTS_PER_REQUEST];
-};
+} __attribute__((__packed__));
 
 struct blkif_x86_64_request_discard {
+	uint8_t        flag;         /* BLKIF_DISCARD_SECURE or zero         */
+	blkif_vdev_t   _pad1;        /* was "handle" for read/write requests */
+        uint32_t       _pad2;        /* offsetof(blkif_..,u.discard.id)==8   */
+	uint64_t       id;
 	blkif_sector_t sector_number;/* start sector idx on disk (r/w only)  */
-	uint64_t nr_sectors;
-};
+	uint64_t       nr_sectors;
+} __attribute__((__packed__));
+
+struct blkif_x86_64_request_other {
+	uint8_t        _pad1;
+	blkif_vdev_t   _pad2;
+	uint32_t       _pad3;        /* offsetof(blkif_..,u.discard.id)==8   */
+	uint64_t       id;           /* private guest value, echoed in resp  */
+} __attribute__((__packed__));
 
 struct blkif_x86_64_request {
 	uint8_t        operation;    /* BLKIF_OP_???                         */
-	uint8_t        nr_segments;  /* number of segments                   */
-	blkif_vdev_t   handle;       /* only for read/write requests         */
-	uint64_t       __attribute__((__aligned__(8))) id;
 	union {
 		struct blkif_x86_64_request_rw rw;
 		struct blkif_x86_64_request_discard discard;
+		struct blkif_x86_64_request_other other;
 	} u;
-};
+} __attribute__((__packed__));
+
 struct blkif_x86_64_response {
 	uint64_t       __attribute__((__aligned__(8))) id;
 	uint8_t         operation;       /* copied from request */
@@ -138,11 +162,6 @@ enum blkif_protocol {
 	BLKIF_PROTOCOL_X86_64 = 3,
 };
 
-enum blkif_backend_type {
-	BLKIF_BACKEND_PHY  = 1,
-	BLKIF_BACKEND_FILE = 2,
-};
-
 struct xen_vbd {
 	/* What the domain refers to this vbd as. */
 	blkif_vdev_t		handle;
@@ -155,10 +174,21 @@ struct xen_vbd {
 	struct block_device	*bdev;
 	/* Cached size parameter. */
 	sector_t		size;
-	bool			flush_support;
+	unsigned int		flush_support:1;
+	unsigned int		discard_secure:1;
+	unsigned int		feature_gnt_persistent:1;
+	unsigned int		overflow_max_grants:1;
 };
 
 struct backend_info;
+
+
+struct persistent_gnt {
+	struct page *page;
+	grant_ref_t gnt;
+	grant_handle_t handle;
+	struct rb_node node;
+};
 
 struct xen_blkif {
 	/* Unique identifier for this interface. */
@@ -168,7 +198,6 @@ struct xen_blkif {
 	unsigned int		irq;
 	/* Comms information. */
 	enum blkif_protocol	blk_protocol;
-	enum blkif_backend_type blk_backend_type;
 	union blkif_back_rings	blk_rings;
 	void			*blk_ring;
 	/* The VBD attached to this interface. */
@@ -187,15 +216,19 @@ struct xen_blkif {
 	struct task_struct	*xenblkd;
 	unsigned int		waiting_reqs;
 
+	/* tree to store persistent grants */
+	struct rb_root		persistent_gnts;
+	unsigned int		persistent_gnt_c;
+
 	/* statistics */
 	unsigned long		st_print;
-	int			st_rd_req;
-	int			st_wr_req;
-	int			st_oo_req;
-	int			st_f_req;
-	int			st_ds_req;
-	int			st_rd_sect;
-	int			st_wr_sect;
+	unsigned long long			st_rd_req;
+	unsigned long long			st_wr_req;
+	unsigned long long			st_oo_req;
+	unsigned long long			st_f_req;
+	unsigned long long			st_ds_req;
+	unsigned long long			st_rd_sect;
+	unsigned long long			st_wr_sect;
 
 	wait_queue_head_t	waiting_to_free;
 };
@@ -237,26 +270,33 @@ static inline void blkif_get_x86_32_req(struct blkif_request *dst,
 {
 	int i, n = BLKIF_MAX_SEGMENTS_PER_REQUEST;
 	dst->operation = src->operation;
-	dst->nr_segments = src->nr_segments;
-	dst->handle = src->handle;
-	dst->id = src->id;
 	switch (src->operation) {
 	case BLKIF_OP_READ:
 	case BLKIF_OP_WRITE:
 	case BLKIF_OP_WRITE_BARRIER:
 	case BLKIF_OP_FLUSH_DISKCACHE:
+		dst->u.rw.nr_segments = src->u.rw.nr_segments;
+		dst->u.rw.handle = src->u.rw.handle;
+		dst->u.rw.id = src->u.rw.id;
 		dst->u.rw.sector_number = src->u.rw.sector_number;
 		barrier();
-		if (n > dst->nr_segments)
-			n = dst->nr_segments;
+		if (n > dst->u.rw.nr_segments)
+			n = dst->u.rw.nr_segments;
 		for (i = 0; i < n; i++)
 			dst->u.rw.seg[i] = src->u.rw.seg[i];
 		break;
 	case BLKIF_OP_DISCARD:
+		dst->u.discard.flag = src->u.discard.flag;
+		dst->u.discard.id = src->u.discard.id;
 		dst->u.discard.sector_number = src->u.discard.sector_number;
 		dst->u.discard.nr_sectors = src->u.discard.nr_sectors;
 		break;
 	default:
+		/*
+		 * Don't know how to translate this op. Only get the
+		 * ID so failure can be reported to the frontend.
+		 */
+		dst->u.other.id = src->u.other.id;
 		break;
 	}
 }
@@ -266,26 +306,33 @@ static inline void blkif_get_x86_64_req(struct blkif_request *dst,
 {
 	int i, n = BLKIF_MAX_SEGMENTS_PER_REQUEST;
 	dst->operation = src->operation;
-	dst->nr_segments = src->nr_segments;
-	dst->handle = src->handle;
-	dst->id = src->id;
 	switch (src->operation) {
 	case BLKIF_OP_READ:
 	case BLKIF_OP_WRITE:
 	case BLKIF_OP_WRITE_BARRIER:
 	case BLKIF_OP_FLUSH_DISKCACHE:
+		dst->u.rw.nr_segments = src->u.rw.nr_segments;
+		dst->u.rw.handle = src->u.rw.handle;
+		dst->u.rw.id = src->u.rw.id;
 		dst->u.rw.sector_number = src->u.rw.sector_number;
 		barrier();
-		if (n > dst->nr_segments)
-			n = dst->nr_segments;
+		if (n > dst->u.rw.nr_segments)
+			n = dst->u.rw.nr_segments;
 		for (i = 0; i < n; i++)
 			dst->u.rw.seg[i] = src->u.rw.seg[i];
 		break;
 	case BLKIF_OP_DISCARD:
+		dst->u.discard.flag = src->u.discard.flag;
+		dst->u.discard.id = src->u.discard.id;
 		dst->u.discard.sector_number = src->u.discard.sector_number;
 		dst->u.discard.nr_sectors = src->u.discard.nr_sectors;
 		break;
 	default:
+		/*
+		 * Don't know how to translate this op. Only get the
+		 * ID so failure can be reported to the frontend.
+		 */
+		dst->u.other.id = src->u.other.id;
 		break;
 	}
 }

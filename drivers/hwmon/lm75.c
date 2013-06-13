@@ -93,6 +93,10 @@ static ssize_t show_temp(struct device *dev, struct device_attribute *da,
 {
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
 	struct lm75_data *data = lm75_update_device(dev);
+
+	if (IS_ERR(data))
+		return PTR_ERR(data);
+
 	return sprintf(buf, "%d\n",
 		       LM75_TEMP_FROM_REG(data->temp[attr->index]));
 }
@@ -107,7 +111,7 @@ static ssize_t set_temp(struct device *dev, struct device_attribute *da,
 	long temp;
 	int error;
 
-	error = strict_strtol(buf, 10, &temp);
+	error = kstrtol(buf, 10, &temp);
 	if (error)
 		return error;
 
@@ -152,7 +156,7 @@ lm75_probe(struct i2c_client *client, const struct i2c_device_id *id)
 			I2C_FUNC_SMBUS_BYTE_DATA | I2C_FUNC_SMBUS_WORD_DATA))
 		return -EIO;
 
-	data = kzalloc(sizeof(struct lm75_data), GFP_KERNEL);
+	data = devm_kzalloc(&client->dev, sizeof(struct lm75_data), GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
 
@@ -170,7 +174,7 @@ lm75_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	status = lm75_read_value(client, LM75_REG_CONF);
 	if (status < 0) {
 		dev_dbg(&client->dev, "Can't read config? %d\n", status);
-		goto exit_free;
+		return status;
 	}
 	data->orig_conf = status;
 	new = status & ~clr_mask;
@@ -182,7 +186,7 @@ lm75_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	/* Register sysfs hooks */
 	status = sysfs_create_group(&client->dev.kobj, &lm75_group);
 	if (status)
-		goto exit_free;
+		return status;
 
 	data->hwmon_dev = hwmon_device_register(&client->dev);
 	if (IS_ERR(data->hwmon_dev)) {
@@ -197,8 +201,6 @@ lm75_probe(struct i2c_client *client, const struct i2c_device_id *id)
 
 exit_remove:
 	sysfs_remove_group(&client->dev.kobj, &lm75_group);
-exit_free:
-	kfree(data);
 	return status;
 }
 
@@ -209,7 +211,6 @@ static int lm75_remove(struct i2c_client *client)
 	hwmon_device_unregister(data->hwmon_dev);
 	sysfs_remove_group(&client->dev.kobj, &lm75_group);
 	lm75_write_value(client, LM75_REG_CONF, data->orig_conf);
-	kfree(data);
 	return 0;
 }
 
@@ -402,6 +403,7 @@ static struct lm75_data *lm75_update_device(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct lm75_data *data = i2c_get_clientdata(client);
+	struct lm75_data *ret = data;
 
 	mutex_lock(&data->update_lock);
 
@@ -414,38 +416,27 @@ static struct lm75_data *lm75_update_device(struct device *dev)
 			int status;
 
 			status = lm75_read_value(client, LM75_REG_TEMP[i]);
-			if (status < 0)
-				dev_dbg(&client->dev, "reg %d, err %d\n",
-						LM75_REG_TEMP[i], status);
-			else
-				data->temp[i] = status;
+			if (unlikely(status < 0)) {
+				dev_dbg(dev,
+					"LM75: Failed to read value: reg %d, error %d\n",
+					LM75_REG_TEMP[i], status);
+				ret = ERR_PTR(status);
+				data->valid = 0;
+				goto abort;
+			}
+			data->temp[i] = status;
 		}
 		data->last_updated = jiffies;
 		data->valid = 1;
 	}
 
+abort:
 	mutex_unlock(&data->update_lock);
-
-	return data;
+	return ret;
 }
 
-/*-----------------------------------------------------------------------*/
-
-/* module glue */
-
-static int __init sensors_lm75_init(void)
-{
-	return i2c_add_driver(&lm75_driver);
-}
-
-static void __exit sensors_lm75_exit(void)
-{
-	i2c_del_driver(&lm75_driver);
-}
+module_i2c_driver(lm75_driver);
 
 MODULE_AUTHOR("Frodo Looijaard <frodol@dds.nl>");
 MODULE_DESCRIPTION("LM75 driver");
 MODULE_LICENSE("GPL");
-
-module_init(sensors_lm75_init);
-module_exit(sensors_lm75_exit);

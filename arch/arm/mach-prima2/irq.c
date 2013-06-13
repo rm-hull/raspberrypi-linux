@@ -9,17 +9,19 @@
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/irq.h>
-#include <mach/hardware.h>
-#include <asm/mach/irq.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/irqdomain.h>
 #include <linux/syscore_ops.h>
+#include <asm/mach/irq.h>
+#include <asm/exception.h>
+#include <mach/hardware.h>
 
 #define SIRFSOC_INT_RISC_MASK0          0x0018
 #define SIRFSOC_INT_RISC_MASK1          0x001C
 #define SIRFSOC_INT_RISC_LEVEL0         0x0020
 #define SIRFSOC_INT_RISC_LEVEL1         0x0024
+#define SIRFSOC_INIT_IRQ_ID		0x0038
 
 void __iomem *sirfsoc_intc_base;
 
@@ -42,13 +44,24 @@ sirfsoc_alloc_gc(void __iomem *base, unsigned int irq_start, unsigned int num)
 static __init void sirfsoc_irq_init(void)
 {
 	sirfsoc_alloc_gc(sirfsoc_intc_base, 0, 32);
-	sirfsoc_alloc_gc(sirfsoc_intc_base + 4, 32, SIRFSOC_INTENAL_IRQ_END - 32);
+	sirfsoc_alloc_gc(sirfsoc_intc_base + 4, 32,
+			SIRFSOC_INTENAL_IRQ_END + 1 - 32);
 
 	writel_relaxed(0, sirfsoc_intc_base + SIRFSOC_INT_RISC_LEVEL0);
 	writel_relaxed(0, sirfsoc_intc_base + SIRFSOC_INT_RISC_LEVEL1);
 
 	writel_relaxed(0, sirfsoc_intc_base + SIRFSOC_INT_RISC_MASK0);
 	writel_relaxed(0, sirfsoc_intc_base + SIRFSOC_INT_RISC_MASK1);
+}
+
+asmlinkage void __exception_irq_entry sirfsoc_handle_irq(struct pt_regs *regs)
+{
+	u32 irqstat, irqnr;
+
+	irqstat = readl_relaxed(sirfsoc_intc_base + SIRFSOC_INIT_IRQ_ID);
+	irqnr = irqstat & 0xff;
+
+	handle_IRQ(irqnr, regs);
 }
 
 static struct of_device_id intc_ids[]  = {
@@ -62,13 +75,14 @@ void __init sirfsoc_of_irq_init(void)
 
 	np = of_find_matching_node(NULL, intc_ids);
 	if (!np)
-		panic("unable to find compatible intc node in dtb\n");
+		return;
 
 	sirfsoc_intc_base = of_iomap(np, 0);
 	if (!sirfsoc_intc_base)
 		panic("unable to map intc cpu registers\n");
 
-	irq_domain_add_simple(np, 0);
+	irq_domain_add_legacy(np, SIRFSOC_INTENAL_IRQ_END + 1, 0, 0,
+		&irq_domain_simple_ops, NULL);
 
 	of_node_put(np);
 

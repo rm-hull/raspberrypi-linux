@@ -25,11 +25,10 @@
  *
  */
 
-#include "linux/string.h"
-#include "linux/bitops.h"
-#include "drmP.h"
-#include "drm.h"
-#include "i915_drm.h"
+#include <linux/string.h>
+#include <linux/bitops.h>
+#include <drm/drmP.h>
+#include <drm/i915_drm.h>
 #include "i915_drv.h"
 
 /** @file i915_gem_tiling.c
@@ -92,9 +91,27 @@ i915_gem_detect_bit_6_swizzle(struct drm_device *dev)
 	uint32_t swizzle_x = I915_BIT_6_SWIZZLE_UNKNOWN;
 	uint32_t swizzle_y = I915_BIT_6_SWIZZLE_UNKNOWN;
 
-	if (INTEL_INFO(dev)->gen >= 6) {
+	if (IS_VALLEYVIEW(dev)) {
 		swizzle_x = I915_BIT_6_SWIZZLE_NONE;
 		swizzle_y = I915_BIT_6_SWIZZLE_NONE;
+	} else if (INTEL_INFO(dev)->gen >= 6) {
+		uint32_t dimm_c0, dimm_c1;
+		dimm_c0 = I915_READ(MAD_DIMM_C0);
+		dimm_c1 = I915_READ(MAD_DIMM_C1);
+		dimm_c0 &= MAD_DIMM_A_SIZE_MASK | MAD_DIMM_B_SIZE_MASK;
+		dimm_c1 &= MAD_DIMM_A_SIZE_MASK | MAD_DIMM_B_SIZE_MASK;
+		/* Enable swizzling when the channels are populated with
+		 * identically sized dimms. We don't need to check the 3rd
+		 * channel because no cpu with gpu attached ships in that
+		 * configuration. Also, swizzling only makes sense for 2
+		 * channels anyway. */
+		if (dimm_c0 == dimm_c1) {
+			swizzle_x = I915_BIT_6_SWIZZLE_9_10;
+			swizzle_y = I915_BIT_6_SWIZZLE_9;
+		} else {
+			swizzle_x = I915_BIT_6_SWIZZLE_NONE;
+			swizzle_y = I915_BIT_6_SWIZZLE_NONE;
+		}
 	} else if (IS_GEN5(dev)) {
 		/* On Ironlake whatever DRAM config, GPU always do
 		 * same swizzling setup.
@@ -107,10 +124,10 @@ i915_gem_detect_bit_6_swizzle(struct drm_device *dev)
 		 */
 		swizzle_x = I915_BIT_6_SWIZZLE_NONE;
 		swizzle_y = I915_BIT_6_SWIZZLE_NONE;
-	} else if (IS_MOBILE(dev)) {
+	} else if (IS_MOBILE(dev) || (IS_GEN3(dev) && !IS_G33(dev))) {
 		uint32_t dcc;
 
-		/* On mobile 9xx chipsets, channel interleave by the CPU is
+		/* On 9xx chipsets, channel interleave by the CPU is
 		 * determined by DCC.  For single-channel, neither the CPU
 		 * nor the GPU do swizzling.  For dual channel interleaved,
 		 * the GPU's interleave is bit 9 and 10 for X tiled, and bit
@@ -255,18 +272,7 @@ i915_gem_object_fence_ok(struct drm_i915_gem_object *obj, int tiling_mode)
 			return false;
 	}
 
-	/*
-	 * Previous chips need to be aligned to the size of the smallest
-	 * fence register that can contain the object.
-	 */
-	if (INTEL_INFO(obj->base.dev)->gen == 3)
-		size = 1024*1024;
-	else
-		size = 512*1024;
-
-	while (size < obj->base.size)
-		size <<= 1;
-
+	size = i915_gem_get_gtt_size(obj->base.dev, obj->base.size, tiling_mode);
 	if (obj->gtt_space->size != size)
 		return false;
 
@@ -339,34 +345,58 @@ i915_gem_set_tiling(struct drm_device *dev, void *data,
 		/* We need to rebind the object if its current allocation
 		 * no longer meets the alignment restrictions for its new
 		 * tiling mode. Otherwise we can just leave it alone, but
-		 * need to ensure that any fence register is cleared.
+		 * need to ensure that any fence register is updated before
+		 * the next fenced (either through the GTT or by the BLT unit
+		 * on older GPUs) access.
+		 *
+		 * After updating the tiling parameters, we then flag whether
+		 * we need to update an associated fence register. Note this
+		 * has to also include the unfenced register the GPU uses
+		 * whilst executing a fenced command for an untiled object.
 		 */
-		i915_gem_release_mmap(obj);
 
 		obj->map_and_fenceable =
 			obj->gtt_space == NULL ||
-			(obj->gtt_offset + obj->base.size <= dev_priv->mm.gtt_mappable_end &&
+			(obj->gtt_offset + obj->base.size <= dev_priv->gtt.mappable_end &&
 			 i915_gem_object_fence_ok(obj, args->tiling_mode));
 
 		/* Rebind if we need a change of alignment */
 		if (!obj->map_and_fenceable) {
 			u32 unfenced_alignment =
-				i915_gem_get_unfenced_gtt_alignment(dev,
-								    obj->base.size,
-								    args->tiling_mode);
+				i915_gem_get_gtt_alignment(dev, obj->base.size,
+							    args->tiling_mode,
+							    false);
 			if (obj->gtt_offset & (unfenced_alignment - 1))
 				ret = i915_gem_object_unbind(obj);
 		}
 
 		if (ret == 0) {
-			obj->tiling_changed = true;
+			obj->fence_dirty =
+				obj->fenced_gpu_access ||
+				obj->fence_reg != I915_FENCE_REG_NONE;
+
 			obj->tiling_mode = args->tiling_mode;
 			obj->stride = args->stride;
+
+			/* Force the fence to be reacquired for GTT access */
+			i915_gem_release_mmap(obj);
 		}
 	}
 	/* we have to maintain this existing ABI... */
 	args->stride = obj->stride;
 	args->tiling_mode = obj->tiling_mode;
+
+	/* Try to preallocate memory required to save swizzling on put-pages */
+	if (i915_gem_object_needs_bit17_swizzle(obj)) {
+		if (obj->bit_17 == NULL) {
+			obj->bit_17 = kmalloc(BITS_TO_LONGS(obj->base.size >> PAGE_SHIFT) *
+					      sizeof(long), GFP_KERNEL);
+		}
+	} else {
+		kfree(obj->bit_17);
+		obj->bit_17 = NULL;
+	}
+
 	drm_gem_object_unreference(&obj->base);
 	mutex_unlock(&dev->struct_mutex);
 
@@ -443,18 +473,20 @@ i915_gem_swizzle_page(struct page *page)
 void
 i915_gem_object_do_bit_17_swizzle(struct drm_i915_gem_object *obj)
 {
+	struct scatterlist *sg;
 	int page_count = obj->base.size >> PAGE_SHIFT;
 	int i;
 
 	if (obj->bit_17 == NULL)
 		return;
 
-	for (i = 0; i < page_count; i++) {
-		char new_bit_17 = page_to_phys(obj->pages[i]) >> 17;
+	for_each_sg(obj->pages->sgl, sg, page_count, i) {
+		struct page *page = sg_page(sg);
+		char new_bit_17 = page_to_phys(page) >> 17;
 		if ((new_bit_17 & 0x1) !=
 		    (test_bit(i, obj->bit_17) != 0)) {
-			i915_gem_swizzle_page(obj->pages[i]);
-			set_page_dirty(obj->pages[i]);
+			i915_gem_swizzle_page(page);
+			set_page_dirty(page);
 		}
 	}
 }
@@ -462,6 +494,7 @@ i915_gem_object_do_bit_17_swizzle(struct drm_i915_gem_object *obj)
 void
 i915_gem_object_save_bit_17_swizzle(struct drm_i915_gem_object *obj)
 {
+	struct scatterlist *sg;
 	int page_count = obj->base.size >> PAGE_SHIFT;
 	int i;
 
@@ -475,8 +508,9 @@ i915_gem_object_save_bit_17_swizzle(struct drm_i915_gem_object *obj)
 		}
 	}
 
-	for (i = 0; i < page_count; i++) {
-		if (page_to_phys(obj->pages[i]) & (1 << 17))
+	for_each_sg(obj->pages->sgl, sg, page_count, i) {
+		struct page *page = sg_page(sg);
+		if (page_to_phys(page) & (1 << 17))
 			__set_bit(i, obj->bit_17);
 		else
 			__clear_bit(i, obj->bit_17);

@@ -41,13 +41,13 @@
 #include <linux/slab.h>
 #include <linux/mlx4/cmd.h>
 #include <linux/mlx4/qp.h>
+#include <linux/if_ether.h>
+#include <linux/etherdevice.h>
 
 #include "mlx4.h"
 #include "fw.h"
 
 #define MLX4_MAC_VALID		(1ull << 63)
-#define MLX4_MAC_MASK		0x7fffffffffffffffULL
-#define ETH_ALEN		6
 
 struct mac_res {
 	struct list_head list;
@@ -57,7 +57,8 @@ struct mac_res {
 
 struct res_common {
 	struct list_head	list;
-	u32		        res_id;
+	struct rb_node		node;
+	u64		        res_id;
 	int			owner;
 	int			state;
 	int			from_state;
@@ -73,6 +74,7 @@ struct res_gid {
 	struct list_head	list;
 	u8			gid[16];
 	enum mlx4_protocol	prot;
+	enum mlx4_steer_type	steer;
 };
 
 enum res_qp_states {
@@ -88,17 +90,6 @@ enum res_qp_states {
 	RES_QP_HW
 };
 
-static inline const char *qp_states_str(enum res_qp_states state)
-{
-	switch (state) {
-	case RES_QP_BUSY: return "RES_QP_BUSY";
-	case RES_QP_RESERVED: return "RES_QP_RESERVED";
-	case RES_QP_MAPPED: return "RES_QP_MAPPED";
-	case RES_QP_HW: return "RES_QP_HW";
-	default: return "Unknown";
-	}
-}
-
 struct res_qp {
 	struct res_common	com;
 	struct res_mtt	       *mtt;
@@ -108,6 +99,7 @@ struct res_qp {
 	struct list_head	mcg_list;
 	spinlock_t		mcg_spl;
 	int			local_qpn;
+	atomic_t		ref_count;
 };
 
 enum res_mtt_states {
@@ -172,16 +164,6 @@ enum res_srq_states {
 	RES_SRQ_HW,
 };
 
-static inline const char *srq_states_str(enum res_srq_states state)
-{
-	switch (state) {
-	case RES_SRQ_BUSY: return "RES_SRQ_BUSY";
-	case RES_SRQ_ALLOCATED: return "RES_SRQ_ALLOCATED";
-	case RES_SRQ_HW: return "RES_SRQ_HW";
-	default: return "Unknown";
-	}
-}
-
 struct res_srq {
 	struct res_common	com;
 	struct res_mtt	       *mtt;
@@ -194,18 +176,81 @@ enum res_counter_states {
 	RES_COUNTER_ALLOCATED,
 };
 
-static inline const char *counter_states_str(enum res_counter_states state)
-{
-	switch (state) {
-	case RES_COUNTER_BUSY: return "RES_COUNTER_BUSY";
-	case RES_COUNTER_ALLOCATED: return "RES_COUNTER_ALLOCATED";
-	default: return "Unknown";
-	}
-}
-
 struct res_counter {
 	struct res_common	com;
 	int			port;
+};
+
+enum res_xrcdn_states {
+	RES_XRCD_BUSY = RES_ANY_BUSY,
+	RES_XRCD_ALLOCATED,
+};
+
+struct res_xrcdn {
+	struct res_common	com;
+	int			port;
+};
+
+enum res_fs_rule_states {
+	RES_FS_RULE_BUSY = RES_ANY_BUSY,
+	RES_FS_RULE_ALLOCATED,
+};
+
+struct res_fs_rule {
+	struct res_common	com;
+	int			qpn;
+};
+
+static void *res_tracker_lookup(struct rb_root *root, u64 res_id)
+{
+	struct rb_node *node = root->rb_node;
+
+	while (node) {
+		struct res_common *res = container_of(node, struct res_common,
+						      node);
+
+		if (res_id < res->res_id)
+			node = node->rb_left;
+		else if (res_id > res->res_id)
+			node = node->rb_right;
+		else
+			return res;
+	}
+	return NULL;
+}
+
+static int res_tracker_insert(struct rb_root *root, struct res_common *res)
+{
+	struct rb_node **new = &(root->rb_node), *parent = NULL;
+
+	/* Figure out where to put new node */
+	while (*new) {
+		struct res_common *this = container_of(*new, struct res_common,
+						       node);
+
+		parent = *new;
+		if (res->res_id < this->res_id)
+			new = &((*new)->rb_left);
+		else if (res->res_id > this->res_id)
+			new = &((*new)->rb_right);
+		else
+			return -EEXIST;
+	}
+
+	/* Add new node and rebalance tree. */
+	rb_link_node(&res->node, parent, new);
+	rb_insert_color(&res->node, root);
+
+	return 0;
+}
+
+enum qp_transition {
+	QP_TRANS_INIT2RTR,
+	QP_TRANS_RTR2RTS,
+	QP_TRANS_RTS2RTS,
+	QP_TRANS_SQERR2RTS,
+	QP_TRANS_SQD2SQD,
+	QP_TRANS_SQD2RTS
 };
 
 /* For Debug uses */
@@ -220,6 +265,8 @@ static const char *ResourceType(enum mlx4_resource rt)
 	case RES_MAC: return  "RES_MAC";
 	case RES_EQ: return "RES_EQ";
 	case RES_COUNTER: return "RES_COUNTER";
+	case RES_FS_RULE: return "RES_FS_RULE";
+	case RES_XRCD: return "RES_XRCD";
 	default: return "Unknown resource type !!!";
 	};
 }
@@ -246,36 +293,63 @@ int mlx4_init_resource_tracker(struct mlx4_dev *dev)
 	mlx4_dbg(dev, "Started init_resource_tracker: %ld slaves\n",
 		 dev->num_slaves);
 	for (i = 0 ; i < MLX4_NUM_OF_RESOURCE_TYPE; i++)
-		INIT_RADIX_TREE(&priv->mfunc.master.res_tracker.res_tree[i],
-				GFP_ATOMIC|__GFP_NOWARN);
+		priv->mfunc.master.res_tracker.res_tree[i] = RB_ROOT;
 
 	spin_lock_init(&priv->mfunc.master.res_tracker.lock);
 	return 0 ;
 }
 
-void mlx4_free_resource_tracker(struct mlx4_dev *dev)
+void mlx4_free_resource_tracker(struct mlx4_dev *dev,
+				enum mlx4_res_tracker_free_type type)
 {
 	struct mlx4_priv *priv = mlx4_priv(dev);
 	int i;
 
 	if (priv->mfunc.master.res_tracker.slave_list) {
-		for (i = 0 ; i < dev->num_slaves; i++)
-			mlx4_delete_all_resources_for_slave(dev, i);
+		if (type != RES_TR_FREE_STRUCTS_ONLY)
+			for (i = 0 ; i < dev->num_slaves; i++)
+				if (type == RES_TR_FREE_ALL ||
+				    dev->caps.function != i)
+					mlx4_delete_all_resources_for_slave(dev, i);
 
-		kfree(priv->mfunc.master.res_tracker.slave_list);
+		if (type != RES_TR_FREE_SLAVES_ONLY) {
+			kfree(priv->mfunc.master.res_tracker.slave_list);
+			priv->mfunc.master.res_tracker.slave_list = NULL;
+		}
 	}
 }
 
-static void update_ud_gid(struct mlx4_dev *dev,
-			  struct mlx4_qp_context *qp_ctx, u8 slave)
+static void update_pkey_index(struct mlx4_dev *dev, int slave,
+			      struct mlx4_cmd_mailbox *inbox)
 {
-	u32 ts = (be32_to_cpu(qp_ctx->flags) >> 16) & 0xff;
+	u8 sched = *(u8 *)(inbox->buf + 64);
+	u8 orig_index = *(u8 *)(inbox->buf + 35);
+	u8 new_index;
+	struct mlx4_priv *priv = mlx4_priv(dev);
+	int port;
+
+	port = (sched >> 6 & 1) + 1;
+
+	new_index = priv->virt2phys_pkey[slave][port - 1][orig_index];
+	*(u8 *)(inbox->buf + 35) = new_index;
+}
+
+static void update_gid(struct mlx4_dev *dev, struct mlx4_cmd_mailbox *inbox,
+		       u8 slave)
+{
+	struct mlx4_qp_context	*qp_ctx = inbox->buf + 8;
+	enum mlx4_qp_optpar	optpar = be32_to_cpu(*(__be32 *) inbox->buf);
+	u32			ts = (be32_to_cpu(qp_ctx->flags) >> 16) & 0xff;
 
 	if (MLX4_QP_ST_UD == ts)
 		qp_ctx->pri_path.mgid_index = 0x80 | slave;
 
-	mlx4_dbg(dev, "slave %d, new gid index: 0x%x ",
-		slave, qp_ctx->pri_path.mgid_index);
+	if (MLX4_QP_ST_RC == ts || MLX4_QP_ST_UC == ts) {
+		if (optpar & MLX4_QP_OPTPAR_PRIMARY_ADDR_PATH)
+			qp_ctx->pri_path.mgid_index = slave & 0x7F;
+		if (optpar & MLX4_QP_OPTPAR_ALT_ADDR_PATH)
+			qp_ctx->alt_path.mgid_index = slave & 0x7F;
+	}
 }
 
 static int mpt_mask(struct mlx4_dev *dev)
@@ -283,16 +357,16 @@ static int mpt_mask(struct mlx4_dev *dev)
 	return dev->caps.num_mpts - 1;
 }
 
-static void *find_res(struct mlx4_dev *dev, int res_id,
+static void *find_res(struct mlx4_dev *dev, u64 res_id,
 		      enum mlx4_resource type)
 {
 	struct mlx4_priv *priv = mlx4_priv(dev);
 
-	return radix_tree_lookup(&priv->mfunc.master.res_tracker.res_tree[type],
-				 res_id);
+	return res_tracker_lookup(&priv->mfunc.master.res_tracker.res_tree[type],
+				  res_id);
 }
 
-static int get_res(struct mlx4_dev *dev, int slave, int res_id,
+static int get_res(struct mlx4_dev *dev, int slave, u64 res_id,
 		   enum mlx4_resource type,
 		   void *res)
 {
@@ -318,8 +392,6 @@ static int get_res(struct mlx4_dev *dev, int slave, int res_id,
 
 	r->from_state = r->state;
 	r->state = RES_ANY_BUSY;
-	mlx4_dbg(dev, "res %s id 0x%x to busy\n",
-		 ResourceType(type), r->res_id);
 
 	if (res)
 		*((struct res_common **)res) = r;
@@ -331,7 +403,7 @@ exit:
 
 int mlx4_get_slave_from_resource_id(struct mlx4_dev *dev,
 				    enum mlx4_resource type,
-				    int res_id, int *slave)
+				    u64 res_id, int *slave)
 {
 
 	struct res_common *r;
@@ -352,7 +424,7 @@ int mlx4_get_slave_from_resource_id(struct mlx4_dev *dev,
 	return err;
 }
 
-static void put_res(struct mlx4_dev *dev, int slave, int res_id,
+static void put_res(struct mlx4_dev *dev, int slave, u64 res_id,
 		    enum mlx4_resource type)
 {
 	struct res_common *r;
@@ -374,8 +446,10 @@ static struct res_common *alloc_qp_tr(int id)
 
 	ret->com.res_id = id;
 	ret->com.state = RES_QP_RESERVED;
+	ret->local_qpn = id;
 	INIT_LIST_HEAD(&ret->mcg_list);
 	spin_lock_init(&ret->mcg_spl);
+	atomic_set(&ret->ref_count, 0);
 
 	return &ret->com;
 }
@@ -469,7 +543,35 @@ static struct res_common *alloc_counter_tr(int id)
 	return &ret->com;
 }
 
-static struct res_common *alloc_tr(int id, enum mlx4_resource type, int slave,
+static struct res_common *alloc_xrcdn_tr(int id)
+{
+	struct res_xrcdn *ret;
+
+	ret = kzalloc(sizeof *ret, GFP_KERNEL);
+	if (!ret)
+		return NULL;
+
+	ret->com.res_id = id;
+	ret->com.state = RES_XRCD_ALLOCATED;
+
+	return &ret->com;
+}
+
+static struct res_common *alloc_fs_rule_tr(u64 id, int qpn)
+{
+	struct res_fs_rule *ret;
+
+	ret = kzalloc(sizeof *ret, GFP_KERNEL);
+	if (!ret)
+		return NULL;
+
+	ret->com.res_id = id;
+	ret->com.state = RES_FS_RULE_ALLOCATED;
+	ret->qpn = qpn;
+	return &ret->com;
+}
+
+static struct res_common *alloc_tr(u64 id, enum mlx4_resource type, int slave,
 				   int extra)
 {
 	struct res_common *ret;
@@ -499,7 +601,12 @@ static struct res_common *alloc_tr(int id, enum mlx4_resource type, int slave,
 	case RES_COUNTER:
 		ret = alloc_counter_tr(id);
 		break;
-
+	case RES_XRCD:
+		ret = alloc_xrcdn_tr(id);
+		break;
+	case RES_FS_RULE:
+		ret = alloc_fs_rule_tr(id, extra);
+		break;
 	default:
 		return NULL;
 	}
@@ -509,7 +616,7 @@ static struct res_common *alloc_tr(int id, enum mlx4_resource type, int slave,
 	return ret;
 }
 
-static int add_res_range(struct mlx4_dev *dev, int slave, int base, int count,
+static int add_res_range(struct mlx4_dev *dev, int slave, u64 base, int count,
 			 enum mlx4_resource type, int extra)
 {
 	int i;
@@ -517,7 +624,7 @@ static int add_res_range(struct mlx4_dev *dev, int slave, int base, int count,
 	struct mlx4_priv *priv = mlx4_priv(dev);
 	struct res_common **res_arr;
 	struct mlx4_resource_tracker *tracker = &priv->mfunc.master.res_tracker;
-	struct radix_tree_root *root = &tracker->res_tree[type];
+	struct rb_root *root = &tracker->res_tree[type];
 
 	res_arr = kzalloc(count * sizeof *res_arr, GFP_KERNEL);
 	if (!res_arr)
@@ -540,7 +647,7 @@ static int add_res_range(struct mlx4_dev *dev, int slave, int base, int count,
 			err = -EEXIST;
 			goto undo;
 		}
-		err = radix_tree_insert(root, base + i, res_arr[i]);
+		err = res_tracker_insert(root, res_arr[i]);
 		if (err)
 			goto undo;
 		list_add_tail(&res_arr[i]->list,
@@ -553,7 +660,7 @@ static int add_res_range(struct mlx4_dev *dev, int slave, int base, int count,
 
 undo:
 	for (--i; i >= base; --i)
-		radix_tree_delete(&tracker->res_tree[type], i);
+		rb_erase(&res_arr[i]->node, root);
 
 	spin_unlock_irq(mlx4_tlock(dev));
 
@@ -567,10 +674,14 @@ undo:
 
 static int remove_qp_ok(struct res_qp *res)
 {
-	if (res->com.state == RES_QP_BUSY)
+	if (res->com.state == RES_QP_BUSY || atomic_read(&res->ref_count) ||
+	    !list_empty(&res->mcg_list)) {
+		pr_err("resource tracker: fail to remove qp, state %d, ref_count %d\n",
+		       res->com.state, atomic_read(&res->ref_count));
 		return -EBUSY;
-	else if (res->com.state != RES_QP_RESERVED)
+	} else if (res->com.state != RES_QP_RESERVED) {
 		return -EPERM;
+	}
 
 	return 0;
 }
@@ -622,6 +733,26 @@ static int remove_counter_ok(struct res_counter *res)
 	return 0;
 }
 
+static int remove_xrcdn_ok(struct res_xrcdn *res)
+{
+	if (res->com.state == RES_XRCD_BUSY)
+		return -EBUSY;
+	else if (res->com.state != RES_XRCD_ALLOCATED)
+		return -EPERM;
+
+	return 0;
+}
+
+static int remove_fs_rule_ok(struct res_fs_rule *res)
+{
+	if (res->com.state == RES_FS_RULE_BUSY)
+		return -EBUSY;
+	else if (res->com.state != RES_FS_RULE_ALLOCATED)
+		return -EPERM;
+
+	return 0;
+}
+
 static int remove_cq_ok(struct res_cq *res)
 {
 	if (res->com.state == RES_CQ_BUSY)
@@ -661,15 +792,19 @@ static int remove_ok(struct res_common *res, enum mlx4_resource type, int extra)
 		return remove_eq_ok((struct res_eq *)res);
 	case RES_COUNTER:
 		return remove_counter_ok((struct res_counter *)res);
+	case RES_XRCD:
+		return remove_xrcdn_ok((struct res_xrcdn *)res);
+	case RES_FS_RULE:
+		return remove_fs_rule_ok((struct res_fs_rule *)res);
 	default:
 		return -EINVAL;
 	}
 }
 
-static int rem_res_range(struct mlx4_dev *dev, int slave, int base, int count,
+static int rem_res_range(struct mlx4_dev *dev, int slave, u64 base, int count,
 			 enum mlx4_resource type, int extra)
 {
-	int i;
+	u64 i;
 	int err;
 	struct mlx4_priv *priv = mlx4_priv(dev);
 	struct mlx4_resource_tracker *tracker = &priv->mfunc.master.res_tracker;
@@ -677,7 +812,7 @@ static int rem_res_range(struct mlx4_dev *dev, int slave, int base, int count,
 
 	spin_lock_irq(mlx4_tlock(dev));
 	for (i = base; i < base + count; ++i) {
-		r = radix_tree_lookup(&tracker->res_tree[type], i);
+		r = res_tracker_lookup(&tracker->res_tree[type], i);
 		if (!r) {
 			err = -ENOENT;
 			goto out;
@@ -692,8 +827,8 @@ static int rem_res_range(struct mlx4_dev *dev, int slave, int base, int count,
 	}
 
 	for (i = base; i < base + count; ++i) {
-		r = radix_tree_lookup(&tracker->res_tree[type], i);
-		radix_tree_delete(&tracker->res_tree[type], i);
+		r = res_tracker_lookup(&tracker->res_tree[type], i);
+		rb_erase(&r->node, &tracker->res_tree[type]);
 		list_del(&r->list);
 		kfree(r);
 	}
@@ -715,7 +850,7 @@ static int qp_res_start_move_to(struct mlx4_dev *dev, int slave, int qpn,
 	int err = 0;
 
 	spin_lock_irq(mlx4_tlock(dev));
-	r = radix_tree_lookup(&tracker->res_tree[RES_QP], qpn);
+	r = res_tracker_lookup(&tracker->res_tree[RES_QP], qpn);
 	if (!r)
 		err = -ENOENT;
 	else if (r->com.owner != slave)
@@ -723,7 +858,7 @@ static int qp_res_start_move_to(struct mlx4_dev *dev, int slave, int qpn,
 	else {
 		switch (state) {
 		case RES_QP_BUSY:
-			mlx4_dbg(dev, "%s: failed RES_QP, 0x%x\n",
+			mlx4_dbg(dev, "%s: failed RES_QP, 0x%llx\n",
 				 __func__, r->com.res_id);
 			err = -EBUSY;
 			break;
@@ -732,7 +867,7 @@ static int qp_res_start_move_to(struct mlx4_dev *dev, int slave, int qpn,
 			if (r->com.state == RES_QP_MAPPED && !alloc)
 				break;
 
-			mlx4_dbg(dev, "failed RES_QP, 0x%x\n", r->com.res_id);
+			mlx4_dbg(dev, "failed RES_QP, 0x%llx\n", r->com.res_id);
 			err = -EINVAL;
 			break;
 
@@ -741,7 +876,7 @@ static int qp_res_start_move_to(struct mlx4_dev *dev, int slave, int qpn,
 			    r->com.state == RES_QP_HW)
 				break;
 			else {
-				mlx4_dbg(dev, "failed RES_QP, 0x%x\n",
+				mlx4_dbg(dev, "failed RES_QP, 0x%llx\n",
 					  r->com.res_id);
 				err = -EINVAL;
 			}
@@ -761,7 +896,7 @@ static int qp_res_start_move_to(struct mlx4_dev *dev, int slave, int qpn,
 			r->com.to_state = state;
 			r->com.state = RES_QP_BUSY;
 			if (qp)
-				*qp = (struct res_qp *)r;
+				*qp = r;
 		}
 	}
 
@@ -779,7 +914,7 @@ static int mr_res_start_move_to(struct mlx4_dev *dev, int slave, int index,
 	int err = 0;
 
 	spin_lock_irq(mlx4_tlock(dev));
-	r = radix_tree_lookup(&tracker->res_tree[RES_MPT], index);
+	r = res_tracker_lookup(&tracker->res_tree[RES_MPT], index);
 	if (!r)
 		err = -ENOENT;
 	else if (r->com.owner != slave)
@@ -814,7 +949,7 @@ static int mr_res_start_move_to(struct mlx4_dev *dev, int slave, int index,
 			r->com.to_state = state;
 			r->com.state = RES_MPT_BUSY;
 			if (mpt)
-				*mpt = (struct res_mpt *)r;
+				*mpt = r;
 		}
 	}
 
@@ -832,7 +967,7 @@ static int eq_res_start_move_to(struct mlx4_dev *dev, int slave, int index,
 	int err = 0;
 
 	spin_lock_irq(mlx4_tlock(dev));
-	r = radix_tree_lookup(&tracker->res_tree[RES_EQ], index);
+	r = res_tracker_lookup(&tracker->res_tree[RES_EQ], index);
 	if (!r)
 		err = -ENOENT;
 	else if (r->com.owner != slave)
@@ -880,7 +1015,7 @@ static int cq_res_start_move_to(struct mlx4_dev *dev, int slave, int cqn,
 	int err;
 
 	spin_lock_irq(mlx4_tlock(dev));
-	r = radix_tree_lookup(&tracker->res_tree[RES_CQ], cqn);
+	r = res_tracker_lookup(&tracker->res_tree[RES_CQ], cqn);
 	if (!r)
 		err = -ENOENT;
 	else if (r->com.owner != slave)
@@ -934,7 +1069,7 @@ static int srq_res_start_move_to(struct mlx4_dev *dev, int slave, int index,
 	int err = 0;
 
 	spin_lock_irq(mlx4_tlock(dev));
-	r = radix_tree_lookup(&tracker->res_tree[RES_SRQ], index);
+	r = res_tracker_lookup(&tracker->res_tree[RES_SRQ], index);
 	if (!r)
 		err = -ENOENT;
 	else if (r->com.owner != slave)
@@ -983,7 +1118,7 @@ static void res_abort_move(struct mlx4_dev *dev, int slave,
 	struct res_common *r;
 
 	spin_lock_irq(mlx4_tlock(dev));
-	r = radix_tree_lookup(&tracker->res_tree[type], id);
+	r = res_tracker_lookup(&tracker->res_tree[type], id);
 	if (r && (r->owner == slave))
 		r->state = r->from_state;
 	spin_unlock_irq(mlx4_tlock(dev));
@@ -997,7 +1132,7 @@ static void res_end_move(struct mlx4_dev *dev, int slave,
 	struct res_common *r;
 
 	spin_lock_irq(mlx4_tlock(dev));
-	r = radix_tree_lookup(&tracker->res_tree[type], id);
+	r = res_tracker_lookup(&tracker->res_tree[type], id);
 	if (r && (r->owner == slave))
 		r->state = r->to_state;
 	spin_unlock_irq(mlx4_tlock(dev));
@@ -1005,7 +1140,13 @@ static void res_end_move(struct mlx4_dev *dev, int slave,
 
 static int valid_reserved(struct mlx4_dev *dev, int slave, int qpn)
 {
-	return mlx4_is_qp_reserved(dev, qpn);
+	return mlx4_is_qp_reserved(dev, qpn) &&
+		(mlx4_is_master(dev) || mlx4_is_guest_proxy(dev, slave, qpn));
+}
+
+static int fw_reserved(struct mlx4_dev *dev, int qpn)
+{
+	return qpn < dev->caps.reserved_qps_cnt[MLX4_QP_REGION_FW];
 }
 
 static int qp_alloc_res(struct mlx4_dev *dev, int slave, int op, int cmd,
@@ -1045,7 +1186,7 @@ static int qp_alloc_res(struct mlx4_dev *dev, int slave, int op, int cmd,
 		if (err)
 			return err;
 
-		if (!valid_reserved(dev, slave, qpn)) {
+		if (!fw_reserved(dev, qpn)) {
 			err = __mlx4_qp_alloc_icm(dev, qpn);
 			if (err) {
 				res_abort_move(dev, slave, RES_QP, qpn);
@@ -1097,14 +1238,14 @@ static int mpt_alloc_res(struct mlx4_dev *dev, int slave, int op, int cmd,
 
 	switch (op) {
 	case RES_OP_RESERVE:
-		index = __mlx4_mr_reserve(dev);
+		index = __mlx4_mpt_reserve(dev);
 		if (index == -1)
 			break;
 		id = index & mpt_mask(dev);
 
 		err = add_res_range(dev, slave, id, 1, RES_MPT, index);
 		if (err) {
-			__mlx4_mr_release(dev, index);
+			__mlx4_mpt_release(dev, index);
 			break;
 		}
 		set_param_l(out_param, index);
@@ -1117,7 +1258,7 @@ static int mpt_alloc_res(struct mlx4_dev *dev, int slave, int op, int cmd,
 		if (err)
 			return err;
 
-		err = __mlx4_mr_alloc_icm(dev, mpt->key);
+		err = __mlx4_mpt_alloc_icm(dev, mpt->key);
 		if (err) {
 			res_abort_move(dev, slave, RES_MPT, id);
 			return err;
@@ -1267,6 +1408,50 @@ static int vlan_alloc_res(struct mlx4_dev *dev, int slave, int op, int cmd,
 	return 0;
 }
 
+static int counter_alloc_res(struct mlx4_dev *dev, int slave, int op, int cmd,
+			     u64 in_param, u64 *out_param)
+{
+	u32 index;
+	int err;
+
+	if (op != RES_OP_RESERVE)
+		return -EINVAL;
+
+	err = __mlx4_counter_alloc(dev, &index);
+	if (err)
+		return err;
+
+	err = add_res_range(dev, slave, index, 1, RES_COUNTER, 0);
+	if (err)
+		__mlx4_counter_free(dev, index);
+	else
+		set_param_l(out_param, index);
+
+	return err;
+}
+
+static int xrcdn_alloc_res(struct mlx4_dev *dev, int slave, int op, int cmd,
+			   u64 in_param, u64 *out_param)
+{
+	u32 xrcdn;
+	int err;
+
+	if (op != RES_OP_RESERVE)
+		return -EINVAL;
+
+	err = __mlx4_xrcd_alloc(dev, &xrcdn);
+	if (err)
+		return err;
+
+	err = add_res_range(dev, slave, xrcdn, 1, RES_XRCD, 0);
+	if (err)
+		__mlx4_xrcd_free(dev, xrcdn);
+	else
+		set_param_l(out_param, xrcdn);
+
+	return err;
+}
+
 int mlx4_ALLOC_RES_wrapper(struct mlx4_dev *dev, int slave,
 			   struct mlx4_vhcr *vhcr,
 			   struct mlx4_cmd_mailbox *inbox,
@@ -1312,6 +1497,16 @@ int mlx4_ALLOC_RES_wrapper(struct mlx4_dev *dev, int slave,
 				    vhcr->in_param, &vhcr->out_param);
 		break;
 
+	case RES_COUNTER:
+		err = counter_alloc_res(dev, slave, vhcr->op_modifier, alop,
+					vhcr->in_param, &vhcr->out_param);
+		break;
+
+	case RES_XRCD:
+		err = xrcdn_alloc_res(dev, slave, vhcr->op_modifier, alop,
+				      vhcr->in_param, &vhcr->out_param);
+		break;
+
 	default:
 		err = -EINVAL;
 		break;
@@ -1344,7 +1539,7 @@ static int qp_free_res(struct mlx4_dev *dev, int slave, int op, int cmd,
 		if (err)
 			return err;
 
-		if (!valid_reserved(dev, slave, qpn))
+		if (!fw_reserved(dev, qpn))
 			__mlx4_qp_free_icm(dev, qpn);
 
 		res_end_move(dev, slave, RES_QP, qpn);
@@ -1398,7 +1593,7 @@ static int mpt_free_res(struct mlx4_dev *dev, int slave, int op, int cmd,
 		err = rem_res_range(dev, slave, id, 1, RES_MPT, 0);
 		if (err)
 			break;
-		__mlx4_mr_release(dev, index);
+		__mlx4_mpt_release(dev, index);
 		break;
 	case RES_OP_MAP_ICM:
 			index = get_param_l(&in_param);
@@ -1408,7 +1603,7 @@ static int mpt_free_res(struct mlx4_dev *dev, int slave, int op, int cmd,
 			if (err)
 				return err;
 
-			__mlx4_mr_free_icm(dev, mpt->key);
+			__mlx4_mpt_free_icm(dev, mpt->key);
 			res_end_move(dev, slave, RES_MPT, id);
 			return err;
 		break;
@@ -1494,6 +1689,44 @@ static int vlan_free_res(struct mlx4_dev *dev, int slave, int op, int cmd,
 	return 0;
 }
 
+static int counter_free_res(struct mlx4_dev *dev, int slave, int op, int cmd,
+			    u64 in_param, u64 *out_param)
+{
+	int index;
+	int err;
+
+	if (op != RES_OP_RESERVE)
+		return -EINVAL;
+
+	index = get_param_l(&in_param);
+	err = rem_res_range(dev, slave, index, 1, RES_COUNTER, 0);
+	if (err)
+		return err;
+
+	__mlx4_counter_free(dev, index);
+
+	return err;
+}
+
+static int xrcdn_free_res(struct mlx4_dev *dev, int slave, int op, int cmd,
+			  u64 in_param, u64 *out_param)
+{
+	int xrcdn;
+	int err;
+
+	if (op != RES_OP_RESERVE)
+		return -EINVAL;
+
+	xrcdn = get_param_l(&in_param);
+	err = rem_res_range(dev, slave, xrcdn, 1, RES_XRCD, 0);
+	if (err)
+		return err;
+
+	__mlx4_xrcd_free(dev, xrcdn);
+
+	return err;
+}
+
 int mlx4_FREE_RES_wrapper(struct mlx4_dev *dev, int slave,
 			  struct mlx4_vhcr *vhcr,
 			  struct mlx4_cmd_mailbox *inbox,
@@ -1539,6 +1772,15 @@ int mlx4_FREE_RES_wrapper(struct mlx4_dev *dev, int slave,
 				   vhcr->in_param, &vhcr->out_param);
 		break;
 
+	case RES_COUNTER:
+		err = counter_free_res(dev, slave, vhcr->op_modifier, alop,
+				       vhcr->in_param, &vhcr->out_param);
+		break;
+
+	case RES_XRCD:
+		err = xrcdn_free_res(dev, slave, vhcr->op_modifier, alop,
+				     vhcr->in_param, &vhcr->out_param);
+
 	default:
 		break;
 	}
@@ -1561,9 +1803,24 @@ static int mr_get_mtt_size(struct mlx4_mpt_entry *mpt)
 	return be32_to_cpu(mpt->mtt_sz);
 }
 
-static int mr_get_pdn(struct mlx4_mpt_entry *mpt)
+static u32 mr_get_pd(struct mlx4_mpt_entry *mpt)
 {
-	return be32_to_cpu(mpt->pd_flags) & 0xffffff;
+	return be32_to_cpu(mpt->pd_flags) & 0x00ffffff;
+}
+
+static int mr_is_fmr(struct mlx4_mpt_entry *mpt)
+{
+	return be32_to_cpu(mpt->pd_flags) & MLX4_MPT_PD_FLAG_FAST_REG;
+}
+
+static int mr_is_bind_enabled(struct mlx4_mpt_entry *mpt)
+{
+	return be32_to_cpu(mpt->flags) & MLX4_MPT_FLAG_BIND_ENABLE;
+}
+
+static int mr_is_region(struct mlx4_mpt_entry *mpt)
+{
+	return be32_to_cpu(mpt->flags) & MLX4_MPT_FLAG_REGION;
 }
 
 static int qp_get_mtt_addr(struct mlx4_qp_context *qpc)
@@ -1602,16 +1859,6 @@ static int qp_get_mtt_size(struct mlx4_qp_context *qpc)
 	return total_pages;
 }
 
-static int qp_get_pdn(struct mlx4_qp_context *qpc)
-{
-	return be32_to_cpu(qpc->pd) & 0xffffff;
-}
-
-static int pdn2slave(int pdn)
-{
-	return (pdn >> NOT_MASKED_PD_BITS) - 1;
-}
-
 static int check_mtt_range(struct mlx4_dev *dev, int slave, int start,
 			   int size, struct res_mtt *mtt)
 {
@@ -1636,11 +1883,40 @@ int mlx4_SW2HW_MPT_wrapper(struct mlx4_dev *dev, int slave,
 	int mtt_base = mr_get_mtt_addr(inbox->buf) / dev->caps.mtt_entry_sz;
 	int phys;
 	int id;
+	u32 pd;
+	int pd_slave;
 
 	id = index & mpt_mask(dev);
 	err = mr_res_start_move_to(dev, slave, id, RES_MPT_HW, &mpt);
 	if (err)
 		return err;
+
+	/* Disable memory windows for VFs. */
+	if (!mr_is_region(inbox->buf)) {
+		err = -EPERM;
+		goto ex_abort;
+	}
+
+	/* Make sure that the PD bits related to the slave id are zeros. */
+	pd = mr_get_pd(inbox->buf);
+	pd_slave = (pd >> 17) & 0x7f;
+	if (pd_slave != 0 && pd_slave != slave) {
+		err = -EPERM;
+		goto ex_abort;
+	}
+
+	if (mr_is_fmr(inbox->buf)) {
+		/* FMR and Bind Enable are forbidden in slave devices. */
+		if (mr_is_bind_enabled(inbox->buf)) {
+			err = -EPERM;
+			goto ex_abort;
+		}
+		/* FMR and Memory Windows are also forbidden. */
+		if (!mr_is_region(inbox->buf)) {
+			err = -EPERM;
+			goto ex_abort;
+		}
+	}
 
 	phys = mr_phys_mpt(inbox->buf);
 	if (!phys) {
@@ -1654,11 +1930,6 @@ int mlx4_SW2HW_MPT_wrapper(struct mlx4_dev *dev, int slave,
 			goto ex_put;
 
 		mpt->mtt = mtt;
-	}
-
-	if (pdn2slave(mr_get_pdn(inbox->buf)) != slave) {
-		err = -EPERM;
-		goto ex_put;
 	}
 
 	err = mlx4_DMA_wrapper(dev, slave, vhcr, inbox, outbox, cmd);
@@ -1757,6 +2028,19 @@ static u32 qp_get_srqn(struct mlx4_qp_context *qpc)
 	return be32_to_cpu(qpc->srqn) & 0x1ffffff;
 }
 
+static void adjust_proxy_tun_qkey(struct mlx4_dev *dev, struct mlx4_vhcr *vhcr,
+				  struct mlx4_qp_context *context)
+{
+	u32 qpn = vhcr->in_modifier & 0xffffff;
+	u32 qkey = 0;
+
+	if (mlx4_get_parav_qkey(dev, qpn, &qkey))
+		return;
+
+	/* adjust qkey in qp context */
+	context->qkey = cpu_to_be32(qkey);
+}
+
 int mlx4_RST2INIT_QP_wrapper(struct mlx4_dev *dev, int slave,
 			     struct mlx4_vhcr *vhcr,
 			     struct mlx4_cmd_mailbox *inbox,
@@ -1792,11 +2076,6 @@ int mlx4_RST2INIT_QP_wrapper(struct mlx4_dev *dev, int slave,
 	if (err)
 		goto ex_put_mtt;
 
-	if (pdn2slave(qp_get_pdn(qpc)) != slave) {
-		err = -EPERM;
-		goto ex_put_mtt;
-	}
-
 	err = get_res(dev, slave, rcqn, RES_CQ, &rcq);
 	if (err)
 		goto ex_put_mtt;
@@ -1814,6 +2093,8 @@ int mlx4_RST2INIT_QP_wrapper(struct mlx4_dev *dev, int slave,
 			goto ex_put_scq;
 	}
 
+	adjust_proxy_tun_qkey(dev, vhcr, qpc);
+	update_pkey_index(dev, slave, inbox);
 	err = mlx4_DMA_wrapper(dev, slave, vhcr, inbox, outbox, cmd);
 	if (err)
 		goto ex_put_srq;
@@ -1959,6 +2240,48 @@ static int get_containing_mtt(struct mlx4_dev *dev, int slave, int start,
 	return err;
 }
 
+static int verify_qp_parameters(struct mlx4_dev *dev,
+				struct mlx4_cmd_mailbox *inbox,
+				enum qp_transition transition, u8 slave)
+{
+	u32			qp_type;
+	struct mlx4_qp_context	*qp_ctx;
+	enum mlx4_qp_optpar	optpar;
+
+	qp_ctx  = inbox->buf + 8;
+	qp_type	= (be32_to_cpu(qp_ctx->flags) >> 16) & 0xff;
+	optpar	= be32_to_cpu(*(__be32 *) inbox->buf);
+
+	switch (qp_type) {
+	case MLX4_QP_ST_RC:
+	case MLX4_QP_ST_UC:
+		switch (transition) {
+		case QP_TRANS_INIT2RTR:
+		case QP_TRANS_RTR2RTS:
+		case QP_TRANS_RTS2RTS:
+		case QP_TRANS_SQD2SQD:
+		case QP_TRANS_SQD2RTS:
+			if (slave != mlx4_master_func_num(dev))
+				/* slaves have only gid index 0 */
+				if (optpar & MLX4_QP_OPTPAR_PRIMARY_ADDR_PATH)
+					if (qp_ctx->pri_path.mgid_index)
+						return -EINVAL;
+				if (optpar & MLX4_QP_OPTPAR_ALT_ADDR_PATH)
+					if (qp_ctx->alt_path.mgid_index)
+						return -EINVAL;
+			break;
+		default:
+			break;
+		}
+
+		break;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
 int mlx4_WRITE_MTT_wrapper(struct mlx4_dev *dev, int slave,
 			   struct mlx4_vhcr *vhcr,
 			   struct mlx4_cmd_mailbox *inbox,
@@ -2048,10 +2371,10 @@ int mlx4_GEN_EQE(struct mlx4_dev *dev, int slave, struct mlx4_eqe *eqe)
 	if (!priv->mfunc.master.slave_state)
 		return -EINVAL;
 
-	event_eq = &priv->mfunc.master.slave_state[slave].event_eq;
+	event_eq = &priv->mfunc.master.slave_state[slave].event_eq[eqe->type];
 
 	/* Create the event only if the slave is registered */
-	if ((event_eq->event_type & (1 << eqe->type)) == 0)
+	if (event_eq->eqn < 0)
 		return 0;
 
 	mutex_lock(&priv->mfunc.master.gen_eqe_mutex[slave]);
@@ -2278,8 +2601,7 @@ int mlx4_MODIFY_CQ_wrapper(struct mlx4_dev *dev, int slave,
 
 	if (vhcr->op_modifier == 0) {
 		err = handle_resize(dev, slave, vhcr, inbox, outbox, cmd, cq);
-		if (err)
-			goto ex_put;
+		goto ex_put;
 	}
 
 	err = mlx4_DMA_wrapper(dev, slave, vhcr, inbox, outbox, cmd);
@@ -2287,11 +2609,6 @@ ex_put:
 	put_res(dev, slave, cqn, RES_CQ);
 
 	return err;
-}
-
-static int srq_get_pdn(struct mlx4_srq_context *srqc)
-{
-	return be32_to_cpu(srqc->pd) & 0xffffff;
 }
 
 static int srq_get_mtt_size(struct mlx4_srq_context *srqc)
@@ -2332,11 +2649,6 @@ int mlx4_SW2HW_SRQ_wrapper(struct mlx4_dev *dev, int slave,
 			      mtt);
 	if (err)
 		goto ex_put_mtt;
-
-	if (pdn2slave(srq_get_pdn(srqc)) != slave) {
-		err = -EPERM;
-		goto ex_put_mtt;
-	}
 
 	err = mlx4_DMA_wrapper(dev, slave, vhcr, inbox, outbox, cmd);
 	if (err)
@@ -2457,16 +2769,123 @@ out:
 	return err;
 }
 
+int mlx4_INIT2INIT_QP_wrapper(struct mlx4_dev *dev, int slave,
+			      struct mlx4_vhcr *vhcr,
+			      struct mlx4_cmd_mailbox *inbox,
+			      struct mlx4_cmd_mailbox *outbox,
+			      struct mlx4_cmd_info *cmd)
+{
+	struct mlx4_qp_context *context = inbox->buf + 8;
+	adjust_proxy_tun_qkey(dev, vhcr, context);
+	update_pkey_index(dev, slave, inbox);
+	return mlx4_GEN_QP_wrapper(dev, slave, vhcr, inbox, outbox, cmd);
+}
+
 int mlx4_INIT2RTR_QP_wrapper(struct mlx4_dev *dev, int slave,
 			     struct mlx4_vhcr *vhcr,
 			     struct mlx4_cmd_mailbox *inbox,
 			     struct mlx4_cmd_mailbox *outbox,
 			     struct mlx4_cmd_info *cmd)
 {
+	int err;
 	struct mlx4_qp_context *qpc = inbox->buf + 8;
 
-	update_ud_gid(dev, qpc, (u8)slave);
+	err = verify_qp_parameters(dev, inbox, QP_TRANS_INIT2RTR, slave);
+	if (err)
+		return err;
 
+	update_pkey_index(dev, slave, inbox);
+	update_gid(dev, inbox, (u8)slave);
+	adjust_proxy_tun_qkey(dev, vhcr, qpc);
+
+	return mlx4_GEN_QP_wrapper(dev, slave, vhcr, inbox, outbox, cmd);
+}
+
+int mlx4_RTR2RTS_QP_wrapper(struct mlx4_dev *dev, int slave,
+			    struct mlx4_vhcr *vhcr,
+			    struct mlx4_cmd_mailbox *inbox,
+			    struct mlx4_cmd_mailbox *outbox,
+			    struct mlx4_cmd_info *cmd)
+{
+	int err;
+	struct mlx4_qp_context *context = inbox->buf + 8;
+
+	err = verify_qp_parameters(dev, inbox, QP_TRANS_RTR2RTS, slave);
+	if (err)
+		return err;
+
+	update_pkey_index(dev, slave, inbox);
+	update_gid(dev, inbox, (u8)slave);
+	adjust_proxy_tun_qkey(dev, vhcr, context);
+	return mlx4_GEN_QP_wrapper(dev, slave, vhcr, inbox, outbox, cmd);
+}
+
+int mlx4_RTS2RTS_QP_wrapper(struct mlx4_dev *dev, int slave,
+			    struct mlx4_vhcr *vhcr,
+			    struct mlx4_cmd_mailbox *inbox,
+			    struct mlx4_cmd_mailbox *outbox,
+			    struct mlx4_cmd_info *cmd)
+{
+	int err;
+	struct mlx4_qp_context *context = inbox->buf + 8;
+
+	err = verify_qp_parameters(dev, inbox, QP_TRANS_RTS2RTS, slave);
+	if (err)
+		return err;
+
+	update_pkey_index(dev, slave, inbox);
+	update_gid(dev, inbox, (u8)slave);
+	adjust_proxy_tun_qkey(dev, vhcr, context);
+	return mlx4_GEN_QP_wrapper(dev, slave, vhcr, inbox, outbox, cmd);
+}
+
+
+int mlx4_SQERR2RTS_QP_wrapper(struct mlx4_dev *dev, int slave,
+			      struct mlx4_vhcr *vhcr,
+			      struct mlx4_cmd_mailbox *inbox,
+			      struct mlx4_cmd_mailbox *outbox,
+			      struct mlx4_cmd_info *cmd)
+{
+	struct mlx4_qp_context *context = inbox->buf + 8;
+	adjust_proxy_tun_qkey(dev, vhcr, context);
+	return mlx4_GEN_QP_wrapper(dev, slave, vhcr, inbox, outbox, cmd);
+}
+
+int mlx4_SQD2SQD_QP_wrapper(struct mlx4_dev *dev, int slave,
+			    struct mlx4_vhcr *vhcr,
+			    struct mlx4_cmd_mailbox *inbox,
+			    struct mlx4_cmd_mailbox *outbox,
+			    struct mlx4_cmd_info *cmd)
+{
+	int err;
+	struct mlx4_qp_context *context = inbox->buf + 8;
+
+	err = verify_qp_parameters(dev, inbox, QP_TRANS_SQD2SQD, slave);
+	if (err)
+		return err;
+
+	adjust_proxy_tun_qkey(dev, vhcr, context);
+	update_gid(dev, inbox, (u8)slave);
+	update_pkey_index(dev, slave, inbox);
+	return mlx4_GEN_QP_wrapper(dev, slave, vhcr, inbox, outbox, cmd);
+}
+
+int mlx4_SQD2RTS_QP_wrapper(struct mlx4_dev *dev, int slave,
+			    struct mlx4_vhcr *vhcr,
+			    struct mlx4_cmd_mailbox *inbox,
+			    struct mlx4_cmd_mailbox *outbox,
+			    struct mlx4_cmd_info *cmd)
+{
+	int err;
+	struct mlx4_qp_context *context = inbox->buf + 8;
+
+	err = verify_qp_parameters(dev, inbox, QP_TRANS_SQD2RTS, slave);
+	if (err)
+		return err;
+
+	adjust_proxy_tun_qkey(dev, vhcr, context);
+	update_gid(dev, inbox, (u8)slave);
+	update_pkey_index(dev, slave, inbox);
 	return mlx4_GEN_QP_wrapper(dev, slave, vhcr, inbox, outbox, cmd);
 }
 
@@ -2514,7 +2933,8 @@ static struct res_gid *find_gid(struct mlx4_dev *dev, int slave,
 }
 
 static int add_mcg_res(struct mlx4_dev *dev, int slave, struct res_qp *rqp,
-		       u8 *gid, enum mlx4_protocol prot)
+		       u8 *gid, enum mlx4_protocol prot,
+		       enum mlx4_steer_type steer)
 {
 	struct res_gid *res;
 	int err;
@@ -2530,6 +2950,7 @@ static int add_mcg_res(struct mlx4_dev *dev, int slave, struct res_qp *rqp,
 	} else {
 		memcpy(res->gid, gid, 16);
 		res->prot = prot;
+		res->steer = steer;
 		list_add_tail(&res->list, &rqp->mcg_list);
 		err = 0;
 	}
@@ -2539,14 +2960,15 @@ static int add_mcg_res(struct mlx4_dev *dev, int slave, struct res_qp *rqp,
 }
 
 static int rem_mcg_res(struct mlx4_dev *dev, int slave, struct res_qp *rqp,
-		       u8 *gid, enum mlx4_protocol prot)
+		       u8 *gid, enum mlx4_protocol prot,
+		       enum mlx4_steer_type steer)
 {
 	struct res_gid *res;
 	int err;
 
 	spin_lock_irq(&rqp->mcg_spl);
 	res = find_gid(dev, slave, rqp, gid);
-	if (!res || res->prot != prot)
+	if (!res || res->prot != prot || res->steer != steer)
 		err = -EINVAL;
 	else {
 		list_del(&res->list);
@@ -2567,13 +2989,16 @@ int mlx4_QP_ATTACH_wrapper(struct mlx4_dev *dev, int slave,
 	struct mlx4_qp qp; /* dummy for calling attach/detach */
 	u8 *gid = inbox->buf;
 	enum mlx4_protocol prot = (vhcr->in_modifier >> 28) & 0x7;
-	int err, err1;
+	int err;
 	int qpn;
 	struct res_qp *rqp;
 	int attach = vhcr->op_modifier;
 	int block_loopback = vhcr->in_modifier >> 31;
 	u8 steer_type_mask = 2;
-	enum mlx4_steer_type type = gid[7] & steer_type_mask;
+	enum mlx4_steer_type type = (gid[7] & steer_type_mask) >> 1;
+
+	if (dev->caps.steering_mode != MLX4_STEERING_MODE_B0)
+		return -EINVAL;
 
 	qpn = vhcr->in_modifier & 0xffffff;
 	err = get_res(dev, slave, qpn, RES_QP, &rqp);
@@ -2582,7 +3007,7 @@ int mlx4_QP_ATTACH_wrapper(struct mlx4_dev *dev, int slave,
 
 	qp.qpn = qpn;
 	if (attach) {
-		err = add_mcg_res(dev, slave, rqp, gid, prot);
+		err = add_mcg_res(dev, slave, rqp, gid, prot, type);
 		if (err)
 			goto ex_put;
 
@@ -2591,7 +3016,7 @@ int mlx4_QP_ATTACH_wrapper(struct mlx4_dev *dev, int slave,
 		if (err)
 			goto ex_rem;
 	} else {
-		err = rem_mcg_res(dev, slave, rqp, gid, prot);
+		err = rem_mcg_res(dev, slave, rqp, gid, prot, type);
 		if (err)
 			goto ex_put;
 		err = mlx4_qp_detach_common(dev, &qp, gid, prot, type);
@@ -2602,10 +3027,213 @@ int mlx4_QP_ATTACH_wrapper(struct mlx4_dev *dev, int slave,
 
 ex_rem:
 	/* ignore error return below, already in error */
-	err1 = rem_mcg_res(dev, slave, rqp, gid, prot);
+	(void) rem_mcg_res(dev, slave, rqp, gid, prot, type);
 ex_put:
 	put_res(dev, slave, qpn, RES_QP);
 
+	return err;
+}
+
+/*
+ * MAC validation for Flow Steering rules.
+ * VF can attach rules only with a mac address which is assigned to it.
+ */
+static int validate_eth_header_mac(int slave, struct _rule_hw *eth_header,
+				   struct list_head *rlist)
+{
+	struct mac_res *res, *tmp;
+	__be64 be_mac;
+
+	/* make sure it isn't multicast or broadcast mac*/
+	if (!is_multicast_ether_addr(eth_header->eth.dst_mac) &&
+	    !is_broadcast_ether_addr(eth_header->eth.dst_mac)) {
+		list_for_each_entry_safe(res, tmp, rlist, list) {
+			be_mac = cpu_to_be64(res->mac << 16);
+			if (!memcmp(&be_mac, eth_header->eth.dst_mac, ETH_ALEN))
+				return 0;
+		}
+		pr_err("MAC %pM doesn't belong to VF %d, Steering rule rejected\n",
+		       eth_header->eth.dst_mac, slave);
+		return -EINVAL;
+	}
+	return 0;
+}
+
+/*
+ * In case of missing eth header, append eth header with a MAC address
+ * assigned to the VF.
+ */
+static int add_eth_header(struct mlx4_dev *dev, int slave,
+			  struct mlx4_cmd_mailbox *inbox,
+			  struct list_head *rlist, int header_id)
+{
+	struct mac_res *res, *tmp;
+	u8 port;
+	struct mlx4_net_trans_rule_hw_ctrl *ctrl;
+	struct mlx4_net_trans_rule_hw_eth *eth_header;
+	struct mlx4_net_trans_rule_hw_ipv4 *ip_header;
+	struct mlx4_net_trans_rule_hw_tcp_udp *l4_header;
+	__be64 be_mac = 0;
+	__be64 mac_msk = cpu_to_be64(MLX4_MAC_MASK << 16);
+
+	ctrl = (struct mlx4_net_trans_rule_hw_ctrl *)inbox->buf;
+	port = ctrl->port;
+	eth_header = (struct mlx4_net_trans_rule_hw_eth *)(ctrl + 1);
+
+	/* Clear a space in the inbox for eth header */
+	switch (header_id) {
+	case MLX4_NET_TRANS_RULE_ID_IPV4:
+		ip_header =
+			(struct mlx4_net_trans_rule_hw_ipv4 *)(eth_header + 1);
+		memmove(ip_header, eth_header,
+			sizeof(*ip_header) + sizeof(*l4_header));
+		break;
+	case MLX4_NET_TRANS_RULE_ID_TCP:
+	case MLX4_NET_TRANS_RULE_ID_UDP:
+		l4_header = (struct mlx4_net_trans_rule_hw_tcp_udp *)
+			    (eth_header + 1);
+		memmove(l4_header, eth_header, sizeof(*l4_header));
+		break;
+	default:
+		return -EINVAL;
+	}
+	list_for_each_entry_safe(res, tmp, rlist, list) {
+		if (port == res->port) {
+			be_mac = cpu_to_be64(res->mac << 16);
+			break;
+		}
+	}
+	if (!be_mac) {
+		pr_err("Failed adding eth header to FS rule, Can't find matching MAC for port %d .\n",
+		       port);
+		return -EINVAL;
+	}
+
+	memset(eth_header, 0, sizeof(*eth_header));
+	eth_header->size = sizeof(*eth_header) >> 2;
+	eth_header->id = cpu_to_be16(__sw_id_hw[MLX4_NET_TRANS_RULE_ID_ETH]);
+	memcpy(eth_header->dst_mac, &be_mac, ETH_ALEN);
+	memcpy(eth_header->dst_mac_msk, &mac_msk, ETH_ALEN);
+
+	return 0;
+
+}
+
+int mlx4_QP_FLOW_STEERING_ATTACH_wrapper(struct mlx4_dev *dev, int slave,
+					 struct mlx4_vhcr *vhcr,
+					 struct mlx4_cmd_mailbox *inbox,
+					 struct mlx4_cmd_mailbox *outbox,
+					 struct mlx4_cmd_info *cmd)
+{
+
+	struct mlx4_priv *priv = mlx4_priv(dev);
+	struct mlx4_resource_tracker *tracker = &priv->mfunc.master.res_tracker;
+	struct list_head *rlist = &tracker->slave_list[slave].res_list[RES_MAC];
+	int err;
+	int qpn;
+	struct res_qp *rqp;
+	struct mlx4_net_trans_rule_hw_ctrl *ctrl;
+	struct _rule_hw  *rule_header;
+	int header_id;
+
+	if (dev->caps.steering_mode !=
+	    MLX4_STEERING_MODE_DEVICE_MANAGED)
+		return -EOPNOTSUPP;
+
+	ctrl = (struct mlx4_net_trans_rule_hw_ctrl *)inbox->buf;
+	qpn = be32_to_cpu(ctrl->qpn) & 0xffffff;
+	err = get_res(dev, slave, qpn, RES_QP, &rqp);
+	if (err) {
+		pr_err("Steering rule with qpn 0x%x rejected.\n", qpn);
+		return err;
+	}
+	rule_header = (struct _rule_hw *)(ctrl + 1);
+	header_id = map_hw_to_sw_id(be16_to_cpu(rule_header->id));
+
+	switch (header_id) {
+	case MLX4_NET_TRANS_RULE_ID_ETH:
+		if (validate_eth_header_mac(slave, rule_header, rlist)) {
+			err = -EINVAL;
+			goto err_put;
+		}
+		break;
+	case MLX4_NET_TRANS_RULE_ID_IB:
+		break;
+	case MLX4_NET_TRANS_RULE_ID_IPV4:
+	case MLX4_NET_TRANS_RULE_ID_TCP:
+	case MLX4_NET_TRANS_RULE_ID_UDP:
+		pr_warn("Can't attach FS rule without L2 headers, adding L2 header.\n");
+		if (add_eth_header(dev, slave, inbox, rlist, header_id)) {
+			err = -EINVAL;
+			goto err_put;
+		}
+		vhcr->in_modifier +=
+			sizeof(struct mlx4_net_trans_rule_hw_eth) >> 2;
+		break;
+	default:
+		pr_err("Corrupted mailbox.\n");
+		err = -EINVAL;
+		goto err_put;
+	}
+
+	err = mlx4_cmd_imm(dev, inbox->dma, &vhcr->out_param,
+			   vhcr->in_modifier, 0,
+			   MLX4_QP_FLOW_STEERING_ATTACH, MLX4_CMD_TIME_CLASS_A,
+			   MLX4_CMD_NATIVE);
+	if (err)
+		goto err_put;
+
+	err = add_res_range(dev, slave, vhcr->out_param, 1, RES_FS_RULE, qpn);
+	if (err) {
+		mlx4_err(dev, "Fail to add flow steering resources.\n ");
+		/* detach rule*/
+		mlx4_cmd(dev, vhcr->out_param, 0, 0,
+			 MLX4_QP_FLOW_STEERING_DETACH, MLX4_CMD_TIME_CLASS_A,
+			 MLX4_CMD_NATIVE);
+		goto err_put;
+	}
+	atomic_inc(&rqp->ref_count);
+err_put:
+	put_res(dev, slave, qpn, RES_QP);
+	return err;
+}
+
+int mlx4_QP_FLOW_STEERING_DETACH_wrapper(struct mlx4_dev *dev, int slave,
+					 struct mlx4_vhcr *vhcr,
+					 struct mlx4_cmd_mailbox *inbox,
+					 struct mlx4_cmd_mailbox *outbox,
+					 struct mlx4_cmd_info *cmd)
+{
+	int err;
+	struct res_qp *rqp;
+	struct res_fs_rule *rrule;
+
+	if (dev->caps.steering_mode !=
+	    MLX4_STEERING_MODE_DEVICE_MANAGED)
+		return -EOPNOTSUPP;
+
+	err = get_res(dev, slave, vhcr->in_param, RES_FS_RULE, &rrule);
+	if (err)
+		return err;
+	/* Release the rule form busy state before removal */
+	put_res(dev, slave, vhcr->in_param, RES_FS_RULE);
+	err = get_res(dev, slave, rrule->qpn, RES_QP, &rqp);
+	if (err)
+		return err;
+
+	err = rem_res_range(dev, slave, vhcr->in_param, 1, RES_FS_RULE, 0);
+	if (err) {
+		mlx4_err(dev, "Fail to remove flow steering resources.\n ");
+		goto out;
+	}
+
+	err = mlx4_cmd(dev, vhcr->in_param, 0, 0,
+		       MLX4_QP_FLOW_STEERING_DETACH, MLX4_CMD_TIME_CLASS_A,
+		       MLX4_CMD_NATIVE);
+	if (!err)
+		atomic_dec(&rqp->ref_count);
+out:
+	put_res(dev, slave, rrule->qpn, RES_QP);
 	return err;
 }
 
@@ -2635,13 +3263,12 @@ static void detach_qp(struct mlx4_dev *dev, int slave, struct res_qp *rqp)
 {
 	struct res_gid *rgid;
 	struct res_gid *tmp;
-	int err;
 	struct mlx4_qp qp; /* dummy for calling attach/detach */
 
 	list_for_each_entry_safe(rgid, tmp, &rqp->mcg_list, list) {
 		qp.qpn = rqp->local_qpn;
-		err = mlx4_qp_detach_common(dev, &qp, rgid->gid, rgid->prot,
-					    MLX4_MC_STEER);
+		(void) mlx4_qp_detach_common(dev, &qp, rgid->gid, rgid->prot,
+					     rgid->steer);
 		list_del(&rgid->list);
 		kfree(rgid);
 	}
@@ -2666,7 +3293,7 @@ static int _move_all_busy(struct mlx4_dev *dev, int slave,
 				if (r->state == RES_ANY_BUSY) {
 					if (print)
 						mlx4_dbg(dev,
-							 "%s id 0x%x is busy\n",
+							 "%s id 0x%llx is busy\n",
 							  ResourceType(type),
 							  r->res_id);
 					++busy;
@@ -2732,8 +3359,8 @@ static void rem_slave_qps(struct mlx4_dev *dev, int slave)
 				switch (state) {
 				case RES_QP_RESERVED:
 					spin_lock_irq(mlx4_tlock(dev));
-					radix_tree_delete(&tracker->res_tree[RES_QP],
-							  qp->com.res_id);
+					rb_erase(&qp->com.node,
+						 &tracker->res_tree[RES_QP]);
 					list_del(&qp->com.list);
 					spin_unlock_irq(mlx4_tlock(dev));
 					kfree(qp);
@@ -2803,8 +3430,8 @@ static void rem_slave_srqs(struct mlx4_dev *dev, int slave)
 				case RES_SRQ_ALLOCATED:
 					__mlx4_srq_free_icm(dev, srqn);
 					spin_lock_irq(mlx4_tlock(dev));
-					radix_tree_delete(&tracker->res_tree[RES_SRQ],
-							  srqn);
+					rb_erase(&srq->com.node,
+						 &tracker->res_tree[RES_SRQ]);
 					list_del(&srq->com.list);
 					spin_unlock_irq(mlx4_tlock(dev));
 					kfree(srq);
@@ -2869,8 +3496,8 @@ static void rem_slave_cqs(struct mlx4_dev *dev, int slave)
 				case RES_CQ_ALLOCATED:
 					__mlx4_cq_free_icm(dev, cqn);
 					spin_lock_irq(mlx4_tlock(dev));
-					radix_tree_delete(&tracker->res_tree[RES_CQ],
-							  cqn);
+					rb_erase(&cq->com.node,
+						 &tracker->res_tree[RES_CQ]);
 					list_del(&cq->com.list);
 					spin_unlock_irq(mlx4_tlock(dev));
 					kfree(cq);
@@ -2930,10 +3557,10 @@ static void rem_slave_mrs(struct mlx4_dev *dev, int slave)
 			while (state != 0) {
 				switch (state) {
 				case RES_MPT_RESERVED:
-					__mlx4_mr_release(dev, mpt->key);
+					__mlx4_mpt_release(dev, mpt->key);
 					spin_lock_irq(mlx4_tlock(dev));
-					radix_tree_delete(&tracker->res_tree[RES_MPT],
-							  mptn);
+					rb_erase(&mpt->com.node,
+						 &tracker->res_tree[RES_MPT]);
 					list_del(&mpt->com.list);
 					spin_unlock_irq(mlx4_tlock(dev));
 					kfree(mpt);
@@ -2941,7 +3568,7 @@ static void rem_slave_mrs(struct mlx4_dev *dev, int slave)
 					break;
 
 				case RES_MPT_MAPPED:
-					__mlx4_mr_free_icm(dev, mpt->key);
+					__mlx4_mpt_free_icm(dev, mpt->key);
 					state = RES_MPT_RESERVED;
 					break;
 
@@ -3001,11 +3628,63 @@ static void rem_slave_mtts(struct mlx4_dev *dev, int slave)
 					__mlx4_free_mtt_range(dev, base,
 							      mtt->order);
 					spin_lock_irq(mlx4_tlock(dev));
-					radix_tree_delete(&tracker->res_tree[RES_MTT],
-							  base);
+					rb_erase(&mtt->com.node,
+						 &tracker->res_tree[RES_MTT]);
 					list_del(&mtt->com.list);
 					spin_unlock_irq(mlx4_tlock(dev));
 					kfree(mtt);
+					state = 0;
+					break;
+
+				default:
+					state = 0;
+				}
+			}
+		}
+		spin_lock_irq(mlx4_tlock(dev));
+	}
+	spin_unlock_irq(mlx4_tlock(dev));
+}
+
+static void rem_slave_fs_rule(struct mlx4_dev *dev, int slave)
+{
+	struct mlx4_priv *priv = mlx4_priv(dev);
+	struct mlx4_resource_tracker *tracker =
+		&priv->mfunc.master.res_tracker;
+	struct list_head *fs_rule_list =
+		&tracker->slave_list[slave].res_list[RES_FS_RULE];
+	struct res_fs_rule *fs_rule;
+	struct res_fs_rule *tmp;
+	int state;
+	u64 base;
+	int err;
+
+	err = move_all_busy(dev, slave, RES_FS_RULE);
+	if (err)
+		mlx4_warn(dev, "rem_slave_fs_rule: Could not move all mtts to busy for slave %d\n",
+			  slave);
+
+	spin_lock_irq(mlx4_tlock(dev));
+	list_for_each_entry_safe(fs_rule, tmp, fs_rule_list, com.list) {
+		spin_unlock_irq(mlx4_tlock(dev));
+		if (fs_rule->com.owner == slave) {
+			base = fs_rule->com.res_id;
+			state = fs_rule->com.from_state;
+			while (state != 0) {
+				switch (state) {
+				case RES_FS_RULE_ALLOCATED:
+					/* detach rule */
+					err = mlx4_cmd(dev, base, 0, 0,
+						       MLX4_QP_FLOW_STEERING_DETACH,
+						       MLX4_CMD_TIME_CLASS_A,
+						       MLX4_CMD_NATIVE);
+
+					spin_lock_irq(mlx4_tlock(dev));
+					rb_erase(&fs_rule->com.node,
+						 &tracker->res_tree[RES_FS_RULE]);
+					list_del(&fs_rule->com.list);
+					spin_unlock_irq(mlx4_tlock(dev));
+					kfree(fs_rule);
 					state = 0;
 					break;
 
@@ -3048,8 +3727,8 @@ static void rem_slave_eqs(struct mlx4_dev *dev, int slave)
 				switch (state) {
 				case RES_EQ_RESERVED:
 					spin_lock_irq(mlx4_tlock(dev));
-					radix_tree_delete(&tracker->res_tree[RES_EQ],
-							  eqn);
+					rb_erase(&eq->com.node,
+						 &tracker->res_tree[RES_EQ]);
 					list_del(&eq->com.list);
 					spin_unlock_irq(mlx4_tlock(dev));
 					kfree(eq);
@@ -3067,14 +3746,13 @@ static void rem_slave_eqs(struct mlx4_dev *dev, int slave)
 							   MLX4_CMD_HW2SW_EQ,
 							   MLX4_CMD_TIME_CLASS_A,
 							   MLX4_CMD_NATIVE);
-					mlx4_dbg(dev, "rem_slave_eqs: failed"
-						 " to move slave %d eqs %d to"
-						 " SW ownership\n", slave, eqn);
+					if (err)
+						mlx4_dbg(dev, "rem_slave_eqs: failed"
+							 " to move slave %d eqs %d to"
+							 " SW ownership\n", slave, eqn);
 					mlx4_free_cmd_mailbox(dev, mailbox);
-					if (!err) {
-						atomic_dec(&eq->mtt->ref_count);
-						state = RES_EQ_RESERVED;
-					}
+					atomic_dec(&eq->mtt->ref_count);
+					state = RES_EQ_RESERVED;
 					break;
 
 				default:
@@ -3087,6 +3765,65 @@ static void rem_slave_eqs(struct mlx4_dev *dev, int slave)
 	spin_unlock_irq(mlx4_tlock(dev));
 }
 
+static void rem_slave_counters(struct mlx4_dev *dev, int slave)
+{
+	struct mlx4_priv *priv = mlx4_priv(dev);
+	struct mlx4_resource_tracker *tracker = &priv->mfunc.master.res_tracker;
+	struct list_head *counter_list =
+		&tracker->slave_list[slave].res_list[RES_COUNTER];
+	struct res_counter *counter;
+	struct res_counter *tmp;
+	int err;
+	int index;
+
+	err = move_all_busy(dev, slave, RES_COUNTER);
+	if (err)
+		mlx4_warn(dev, "rem_slave_counters: Could not move all counters to "
+			  "busy for slave %d\n", slave);
+
+	spin_lock_irq(mlx4_tlock(dev));
+	list_for_each_entry_safe(counter, tmp, counter_list, com.list) {
+		if (counter->com.owner == slave) {
+			index = counter->com.res_id;
+			rb_erase(&counter->com.node,
+				 &tracker->res_tree[RES_COUNTER]);
+			list_del(&counter->com.list);
+			kfree(counter);
+			__mlx4_counter_free(dev, index);
+		}
+	}
+	spin_unlock_irq(mlx4_tlock(dev));
+}
+
+static void rem_slave_xrcdns(struct mlx4_dev *dev, int slave)
+{
+	struct mlx4_priv *priv = mlx4_priv(dev);
+	struct mlx4_resource_tracker *tracker = &priv->mfunc.master.res_tracker;
+	struct list_head *xrcdn_list =
+		&tracker->slave_list[slave].res_list[RES_XRCD];
+	struct res_xrcdn *xrcd;
+	struct res_xrcdn *tmp;
+	int err;
+	int xrcdn;
+
+	err = move_all_busy(dev, slave, RES_XRCD);
+	if (err)
+		mlx4_warn(dev, "rem_slave_xrcdns: Could not move all xrcdns to "
+			  "busy for slave %d\n", slave);
+
+	spin_lock_irq(mlx4_tlock(dev));
+	list_for_each_entry_safe(xrcd, tmp, xrcdn_list, com.list) {
+		if (xrcd->com.owner == slave) {
+			xrcdn = xrcd->com.res_id;
+			rb_erase(&xrcd->com.node, &tracker->res_tree[RES_XRCD]);
+			list_del(&xrcd->com.list);
+			kfree(xrcd);
+			__mlx4_xrcd_free(dev, xrcdn);
+		}
+	}
+	spin_unlock_irq(mlx4_tlock(dev));
+}
+
 void mlx4_delete_all_resources_for_slave(struct mlx4_dev *dev, int slave)
 {
 	struct mlx4_priv *priv = mlx4_priv(dev);
@@ -3094,11 +3831,14 @@ void mlx4_delete_all_resources_for_slave(struct mlx4_dev *dev, int slave)
 	mutex_lock(&priv->mfunc.master.res_tracker.slave_list[slave].mutex);
 	/*VLAN*/
 	rem_slave_macs(dev, slave);
+	rem_slave_fs_rule(dev, slave);
 	rem_slave_qps(dev, slave);
 	rem_slave_srqs(dev, slave);
 	rem_slave_cqs(dev, slave);
 	rem_slave_mrs(dev, slave);
 	rem_slave_eqs(dev, slave);
 	rem_slave_mtts(dev, slave);
+	rem_slave_counters(dev, slave);
+	rem_slave_xrcdns(dev, slave);
 	mutex_unlock(&priv->mfunc.master.res_tracker.slave_list[slave].mutex);
 }

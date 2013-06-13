@@ -50,7 +50,6 @@
 #include <linux/platform_device.h>
 #include <linux/gfp.h>
 
-#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/tsi108.h>
 
@@ -1148,7 +1147,7 @@ static int tsi108_set_mac(struct net_device *dev, void *addr)
 	int i;
 
 	if (!is_valid_ether_addr(addr))
-		return -EINVAL;
+		return -EADDRNOTAVAIL;
 
 	for (i = 0; i < 6; i++)
 		/* +2 is for the offset of the HW addr type */
@@ -1359,7 +1358,6 @@ static int tsi108_open(struct net_device *dev)
 			break;
 		}
 
-		data->rxskbs[i] = skb;
 		data->rxskbs[i] = skb;
 		data->rxring[i].buf0 = virt_to_phys(data->rxskbs[i]->data);
 		data->rxring[i].misc = TSI108_RX_OWN | TSI108_RX_INT;
@@ -1582,10 +1580,8 @@ tsi108_init_one(struct platform_device *pdev)
 	/* Create an ethernet device instance */
 
 	dev = alloc_etherdev(sizeof(struct tsi108_prv_data));
-	if (!dev) {
-		printk("tsi108_eth: Could not allocate a device structure\n");
+	if (!dev)
 		return -ENOMEM;
-	}
 
 	printk("tsi108_eth%d: probe...\n", pdev->id);
 	data = netdev_priv(dev);
@@ -1604,7 +1600,7 @@ tsi108_init_one(struct platform_device *pdev)
 	data->phyregs = ioremap(einfo->phyregs, 0x400);
 	if (NULL == data->phyregs) {
 		err = -ENOMEM;
-		goto regs_fail;
+		goto phyregs_fail;
 	}
 /* MII setup */
 	data->mii_if.dev = dev;
@@ -1663,8 +1659,10 @@ tsi108_init_one(struct platform_device *pdev)
 	return 0;
 
 register_fail:
-	iounmap(data->regs);
 	iounmap(data->phyregs);
+
+phyregs_fail:
+	iounmap(data->regs);
 
 regs_fail:
 	free_netdev(dev);

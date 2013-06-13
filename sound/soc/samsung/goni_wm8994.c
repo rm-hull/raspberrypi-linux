@@ -228,7 +228,7 @@ static struct snd_soc_dai_link goni_dai[] = {
 	.stream_name = "WM8994 HiFi",
 	.cpu_dai_name = "samsung-i2s.0",
 	.codec_dai_name = "wm8994-aif1",
-	.platform_name = "samsung-audio",
+	.platform_name = "samsung-i2s.0",
 	.codec_name = "wm8994-codec.0-001a",
 	.init = goni_wm8994_init,
 	.ops = &goni_hifi_ops,
@@ -244,6 +244,7 @@ static struct snd_soc_dai_link goni_dai[] = {
 
 static struct snd_soc_card goni = {
 	.name = "goni",
+	.owner = THIS_MODULE,
 	.dai_link = goni_dai,
 	.num_links = ARRAY_SIZE(goni_dai),
 

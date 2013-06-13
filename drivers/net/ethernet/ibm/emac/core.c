@@ -1,5 +1,5 @@
 /*
- * drivers/net/ibm_newemac/core.c
+ * drivers/net/ethernet/ibm/emac/core.c
  *
  * Driver for PowerPC 4xx on-chip ethernet controller.
  *
@@ -433,6 +433,11 @@ static inline u32 emac_iff2rmr(struct net_device *ndev)
 		r |= EMAC_RMR_PMME;
 	else if (!netdev_mc_empty(ndev))
 		r |= EMAC_RMR_MAE;
+
+	if (emac_has_feature(dev, EMAC_APM821XX_REQ_JUMBO_FRAME_SIZE)) {
+		r &= ~EMAC4_RMR_MJS_MASK;
+		r |= EMAC4_RMR_MJS(ndev->mtu);
+	}
 
 	return r;
 }
@@ -965,6 +970,7 @@ static int emac_resize_rx_ring(struct emac_instance *dev, int new_mtu)
 	int rx_sync_size = emac_rx_sync_size(new_mtu);
 	int rx_skb_size = emac_rx_skb_size(new_mtu);
 	int i, ret = 0;
+	int mr1_jumbo_bit_change = 0;
 
 	mutex_lock(&dev->link_lock);
 	emac_netif_stop(dev);
@@ -1013,7 +1019,15 @@ static int emac_resize_rx_ring(struct emac_instance *dev, int new_mtu)
 	}
  skip:
 	/* Check if we need to change "Jumbo" bit in MR1 */
-	if ((new_mtu > ETH_DATA_LEN) ^ (dev->ndev->mtu > ETH_DATA_LEN)) {
+	if (emac_has_feature(dev, EMAC_APM821XX_REQ_JUMBO_FRAME_SIZE)) {
+		mr1_jumbo_bit_change = (new_mtu > ETH_DATA_LEN) ||
+				(dev->ndev->mtu > ETH_DATA_LEN);
+	} else {
+		mr1_jumbo_bit_change = (new_mtu > ETH_DATA_LEN) ^
+				(dev->ndev->mtu > ETH_DATA_LEN);
+	}
+
+	if (mr1_jumbo_bit_change) {
 		/* This is to prevent starting RX channel in emac_rx_enable() */
 		set_bit(MAL_COMMAC_RX_STOPPED, &dev->commac.flags);
 
@@ -2176,11 +2190,10 @@ static void emac_ethtool_get_drvinfo(struct net_device *ndev,
 {
 	struct emac_instance *dev = netdev_priv(ndev);
 
-	strcpy(info->driver, "ibm_emac");
-	strcpy(info->version, DRV_VERSION);
-	info->fw_version[0] = '\0';
-	sprintf(info->bus_info, "PPC 4xx EMAC-%d %s",
-		dev->cell_index, dev->ofdev->dev.of_node->full_name);
+	strlcpy(info->driver, "ibm_emac", sizeof(info->driver));
+	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
+	snprintf(info->bus_info, sizeof(info->bus_info), "PPC 4xx EMAC-%d %s",
+		 dev->cell_index, dev->ofdev->dev.of_node->full_name);
 	info->regdump_len = emac_ethtool_get_regs_len(ndev);
 }
 
@@ -2247,8 +2260,8 @@ struct emac_depentry {
 #define	EMAC_DEP_PREV_IDX	5
 #define	EMAC_DEP_COUNT		6
 
-static int __devinit emac_check_deps(struct emac_instance *dev,
-				     struct emac_depentry *deps)
+static int emac_check_deps(struct emac_instance *dev,
+			   struct emac_depentry *deps)
 {
 	int i, there = 0;
 	struct device_node *np;
@@ -2300,8 +2313,8 @@ static void emac_put_deps(struct emac_instance *dev)
 		of_dev_put(dev->tah_dev);
 }
 
-static int __devinit emac_of_bus_notify(struct notifier_block *nb,
-					unsigned long action, void *data)
+static int emac_of_bus_notify(struct notifier_block *nb, unsigned long action,
+			      void *data)
 {
 	/* We are only intereted in device addition */
 	if (action == BUS_NOTIFY_BOUND_DRIVER)
@@ -2309,11 +2322,11 @@ static int __devinit emac_of_bus_notify(struct notifier_block *nb,
 	return 0;
 }
 
-static struct notifier_block emac_of_bus_notifier __devinitdata = {
+static struct notifier_block emac_of_bus_notifier = {
 	.notifier_call = emac_of_bus_notify
 };
 
-static int __devinit emac_wait_deps(struct emac_instance *dev)
+static int emac_wait_deps(struct emac_instance *dev)
 {
 	struct emac_depentry deps[EMAC_DEP_COUNT];
 	int i, err;
@@ -2353,8 +2366,8 @@ static int __devinit emac_wait_deps(struct emac_instance *dev)
 	return err;
 }
 
-static int __devinit emac_read_uint_prop(struct device_node *np, const char *name,
-					 u32 *val, int fatal)
+static int emac_read_uint_prop(struct device_node *np, const char *name,
+			       u32 *val, int fatal)
 {
 	int len;
 	const u32 *prop = of_get_property(np, name, &len);
@@ -2368,7 +2381,7 @@ static int __devinit emac_read_uint_prop(struct device_node *np, const char *nam
 	return 0;
 }
 
-static int __devinit emac_init_phy(struct emac_instance *dev)
+static int emac_init_phy(struct emac_instance *dev)
 {
 	struct device_node *np = dev->ofdev->dev.of_node;
 	struct net_device *ndev = dev->ndev;
@@ -2471,6 +2484,7 @@ static int __devinit emac_init_phy(struct emac_instance *dev)
 
 	/* Disable any PHY features not supported by the platform */
 	dev->phy.def->features &= ~dev->phy_feat_exc;
+	dev->phy.features &= ~dev->phy_feat_exc;
 
 	/* Setup initial link parameters */
 	if (dev->phy.features & SUPPORTED_Autoneg) {
@@ -2503,7 +2517,7 @@ static int __devinit emac_init_phy(struct emac_instance *dev)
 	return 0;
 }
 
-static int __devinit emac_init_config(struct emac_instance *dev)
+static int emac_init_config(struct emac_instance *dev)
 {
 	struct device_node *np = dev->ofdev->dev.of_node;
 	const void *p;
@@ -2568,6 +2582,11 @@ static int __devinit emac_init_config(struct emac_instance *dev)
 		if (of_device_is_compatible(np, "ibm,emac-405ex") ||
 		    of_device_is_compatible(np, "ibm,emac-405exr"))
 			dev->features |= EMAC_FTR_440EP_PHY_CLK_FIX;
+		if (of_device_is_compatible(np, "ibm,emac-apm821xx")) {
+			dev->features |= (EMAC_APM821XX_REQ_JUMBO_FRAME_SIZE |
+					  EMAC_FTR_APM821XX_NO_HALF_DUPLEX |
+					  EMAC_FTR_460EX_PHY_CLK_FIX);
+		}
 	} else if (of_device_is_compatible(np, "ibm,emac4")) {
 		dev->features |= EMAC_FTR_EMAC4;
 		if (of_device_is_compatible(np, "ibm,emac-440gx"))
@@ -2683,7 +2702,7 @@ static const struct net_device_ops emac_gige_netdev_ops = {
 	.ndo_change_mtu		= emac_change_mtu,
 };
 
-static int __devinit emac_probe(struct platform_device *ofdev)
+static int emac_probe(struct platform_device *ofdev)
 {
 	struct net_device *ndev;
 	struct emac_instance *dev;
@@ -2706,11 +2725,9 @@ static int __devinit emac_probe(struct platform_device *ofdev)
 	/* Allocate our net_device structure */
 	err = -ENOMEM;
 	ndev = alloc_etherdev(sizeof(struct emac_instance));
-	if (!ndev) {
-		printk(KERN_ERR "%s: could not allocate ethernet device!\n",
-		       np->full_name);
+	if (!ndev)
 		goto err_gone;
-	}
+
 	dev = netdev_priv(ndev);
 	dev->ndev = ndev;
 	dev->ofdev = ofdev;
@@ -2818,6 +2835,13 @@ static int __devinit emac_probe(struct platform_device *ofdev)
 	dev->stop_timeout = STOP_TIMEOUT_100;
 	INIT_DELAYED_WORK(&dev->link_work, emac_link_timer);
 
+	/* Some SoCs like APM821xx does not support Half Duplex mode. */
+	if (emac_has_feature(dev, EMAC_FTR_APM821XX_NO_HALF_DUPLEX)) {
+		dev->phy_feat_exc = (SUPPORTED_1000baseT_Half |
+				     SUPPORTED_100baseT_Half |
+				     SUPPORTED_10baseT_Half);
+	}
+
 	/* Find PHY if any */
 	err = emac_init_phy(dev);
 	if (err != 0)
@@ -2905,7 +2929,7 @@ static int __devinit emac_probe(struct platform_device *ofdev)
 	return err;
 }
 
-static int __devexit emac_remove(struct platform_device *ofdev)
+static int emac_remove(struct platform_device *ofdev)
 {
 	struct emac_instance *dev = dev_get_drvdata(&ofdev->dev);
 

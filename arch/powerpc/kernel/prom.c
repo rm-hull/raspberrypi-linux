@@ -32,6 +32,7 @@
 #include <linux/debugfs.h>
 #include <linux/irq.h>
 #include <linux/memblock.h>
+#include <linux/of.h>
 
 #include <asm/prom.h>
 #include <asm/rtas.h>
@@ -41,7 +42,6 @@
 #include <asm/io.h>
 #include <asm/kdump.h>
 #include <asm/smp.h>
-#include <asm/system.h>
 #include <asm/mmu.h>
 #include <asm/paca.h>
 #include <asm/pgtable.h>
@@ -50,11 +50,11 @@
 #include <asm/btext.h>
 #include <asm/sections.h>
 #include <asm/machdep.h>
-#include <asm/pSeries_reconfig.h>
 #include <asm/pci-bridge.h>
-#include <asm/phyp_dump.h>
 #include <asm/kexec.h>
 #include <asm/opal.h>
+#include <asm/fadump.h>
+#include <asm/debug.h>
 
 #include <mm/mmu_decl.h>
 
@@ -79,7 +79,7 @@ static int __init early_parse_mem(char *p)
 		return 1;
 
 	memory_limit = PAGE_ALIGN(memparse(p, &p));
-	DBG("memory limit = 0x%llx\n", (unsigned long long)memory_limit);
+	DBG("memory limit = 0x%llx\n", memory_limit);
 
 	return 0;
 }
@@ -615,86 +615,6 @@ static void __init early_reserve_mem(void)
 	}
 }
 
-#ifdef CONFIG_PHYP_DUMP
-/**
- * phyp_dump_calculate_reserve_size() - reserve variable boot area 5% or arg
- *
- * Function to find the largest size we need to reserve
- * during early boot process.
- *
- * It either looks for boot param and returns that OR
- * returns larger of 256 or 5% rounded down to multiples of 256MB.
- *
- */
-static inline unsigned long phyp_dump_calculate_reserve_size(void)
-{
-	unsigned long tmp;
-
-	if (phyp_dump_info->reserve_bootvar)
-		return phyp_dump_info->reserve_bootvar;
-
-	/* divide by 20 to get 5% of value */
-	tmp = memblock_end_of_DRAM();
-	do_div(tmp, 20);
-
-	/* round it down in multiples of 256 */
-	tmp = tmp & ~0x0FFFFFFFUL;
-
-	return (tmp > PHYP_DUMP_RMR_END ? tmp : PHYP_DUMP_RMR_END);
-}
-
-/**
- * phyp_dump_reserve_mem() - reserve all not-yet-dumped mmemory
- *
- * This routine may reserve memory regions in the kernel only
- * if the system is supported and a dump was taken in last
- * boot instance or if the hardware is supported and the
- * scratch area needs to be setup. In other instances it returns
- * without reserving anything. The memory in case of dump being
- * active is freed when the dump is collected (by userland tools).
- */
-static void __init phyp_dump_reserve_mem(void)
-{
-	unsigned long base, size;
-	unsigned long variable_reserve_size;
-
-	if (!phyp_dump_info->phyp_dump_configured) {
-		printk(KERN_ERR "Phyp-dump not supported on this hardware\n");
-		return;
-	}
-
-	if (!phyp_dump_info->phyp_dump_at_boot) {
-		printk(KERN_INFO "Phyp-dump disabled at boot time\n");
-		return;
-	}
-
-	variable_reserve_size = phyp_dump_calculate_reserve_size();
-
-	if (phyp_dump_info->phyp_dump_is_active) {
-		/* Reserve *everything* above RMR.Area freed by userland tools*/
-		base = variable_reserve_size;
-		size = memblock_end_of_DRAM() - base;
-
-		/* XXX crashed_ram_end is wrong, since it may be beyond
-		 * the memory_limit, it will need to be adjusted. */
-		memblock_reserve(base, size);
-
-		phyp_dump_info->init_reserve_start = base;
-		phyp_dump_info->init_reserve_size = size;
-	} else {
-		size = phyp_dump_info->cpu_state_size +
-			phyp_dump_info->hpte_region_size +
-			variable_reserve_size;
-		base = memblock_end_of_DRAM() - size;
-		memblock_reserve(base, size);
-		phyp_dump_info->init_reserve_start = base;
-		phyp_dump_info->init_reserve_size = size;
-	}
-}
-#else
-static inline void __init phyp_dump_reserve_mem(void) {}
-#endif /* CONFIG_PHYP_DUMP  && CONFIG_PPC_RTAS */
-
 void __init early_init_devtree(void *params)
 {
 	phys_addr_t limit;
@@ -714,9 +634,9 @@ void __init early_init_devtree(void *params)
 	of_scan_flat_dt(early_init_dt_scan_opal, NULL);
 #endif
 
-#ifdef CONFIG_PHYP_DUMP
-	/* scan tree to see if dump occurred during last boot */
-	of_scan_flat_dt(early_init_dt_scan_phyp_dump, NULL);
+#ifdef CONFIG_FA_DUMP
+	/* scan tree to see if dump is active during last boot */
+	of_scan_flat_dt(early_init_dt_scan_fw_dump, NULL);
 #endif
 
 	/* Pre-initialize the cmd_line with the content of boot_commmand_line,
@@ -742,7 +662,7 @@ void __init early_init_devtree(void *params)
 
 	/* make sure we've parsed cmdline for mem= before this */
 	if (memory_limit)
-		first_memblock_size = min(first_memblock_size, memory_limit);
+		first_memblock_size = min_t(u64, first_memblock_size, memory_limit);
 	setup_initial_memory_limit(memstart_addr, first_memblock_size);
 	/* Reserve MEMBLOCK regions used by kernel, initrd, dt, etc... */
 	memblock_reserve(PHYSICAL_START, __pa(klimit) - PHYSICAL_START);
@@ -750,9 +670,15 @@ void __init early_init_devtree(void *params)
 	if (PHYSICAL_START > MEMORY_START)
 		memblock_reserve(MEMORY_START, 0x8000);
 	reserve_kdump_trampoline();
-	reserve_crashkernel();
+#ifdef CONFIG_FA_DUMP
+	/*
+	 * If we fail to reserve memory for firmware-assisted dump then
+	 * fallback to kexec based kdump.
+	 */
+	if (fadump_reserve_mem() == 0)
+#endif
+		reserve_crashkernel();
 	early_reserve_mem();
-	phyp_dump_reserve_mem();
 
 	/*
 	 * Ensure that total memory size is page-aligned, because otherwise
@@ -877,7 +803,7 @@ static int prom_reconfig_notifier(struct notifier_block *nb,
 	int err;
 
 	switch (action) {
-	case PSERIES_RECONFIG_ADD:
+	case OF_RECONFIG_ATTACH_NODE:
 		err = of_finish_dynamic_node(node);
 		if (err < 0)
 			printk(KERN_ERR "finish_node returned %d\n", err);
@@ -896,7 +822,7 @@ static struct notifier_block prom_reconfig_nb = {
 
 static int __init prom_reconfig_setup(void)
 {
-	return pSeries_reconfig_notifier_register(&prom_reconfig_nb);
+	return of_reconfig_notifier_register(&prom_reconfig_nb);
 }
 __initcall(prom_reconfig_setup);
 #endif

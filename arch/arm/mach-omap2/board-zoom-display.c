@@ -14,8 +14,12 @@
 #include <linux/gpio.h>
 #include <linux/i2c/twl.h>
 #include <linux/spi/spi.h>
-#include <plat/mcspi.h>
+#include <linux/platform_data/spi-omap2-mcspi.h>
 #include <video/omapdss.h>
+#include "board-zoom.h"
+
+#include "soc.h"
+#include "common.h"
 
 #define LCD_PANEL_RESET_GPIO_PROD	96
 #define LCD_PANEL_RESET_GPIO_PILOT	55
@@ -45,16 +49,17 @@ static void zoom_panel_disable_lcd(struct omap_dss_device *dssdev)
 {
 }
 
-/*
- * PWMA/B register offsets (TWL4030_MODULE_PWMA)
- */
+/* Register offsets in TWL4030_MODULE_INTBR */
 #define TWL_INTBR_PMBR1	0xD
 #define TWL_INTBR_GPBR1	0xC
-#define TWL_LED_PWMON	0x0
-#define TWL_LED_PWMOFF	0x1
+
+/* Register offsets in TWL_MODULE_PWM */
+#define TWL_LED_PWMON	0x3
+#define TWL_LED_PWMOFF	0x4
 
 static int zoom_set_bl_intensity(struct omap_dss_device *dssdev, int level)
 {
+#ifdef CONFIG_TWL4030_CORE
 	unsigned char c;
 	u8 mux_pwm, enb_pwm;
 
@@ -88,8 +93,11 @@ static int zoom_set_bl_intensity(struct omap_dss_device *dssdev, int level)
 	}
 
 	c = ((50 * (100 - level)) / 100) + 1;
-	twl_i2c_write_u8(TWL4030_MODULE_PWM1, 0x7F, TWL_LED_PWMOFF);
-	twl_i2c_write_u8(TWL4030_MODULE_PWM1, c, TWL_LED_PWMON);
+	twl_i2c_write_u8(TWL_MODULE_PWM, 0x7F, TWL_LED_PWMOFF);
+	twl_i2c_write_u8(TWL_MODULE_PWM, c, TWL_LED_PWMON);
+#else
+	pr_warn("Backlight not enabled\n");
+#endif
 
 	return 0;
 }
@@ -117,7 +125,6 @@ static struct omap_dss_board_info zoom_dss_data = {
 
 static struct omap2_mcspi_device_config dss_lcd_mcspi_config = {
 	.turbo_mode		= 1,
-	.single_channel	= 1,  /* 0: slave, 1: master */
 };
 
 static struct spi_board_info nec_8048_spi_board_info[] __initdata = {

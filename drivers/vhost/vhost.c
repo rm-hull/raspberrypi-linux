@@ -26,10 +26,6 @@
 #include <linux/kthread.h>
 #include <linux/cgroup.h>
 
-#include <linux/net.h>
-#include <linux/if_packet.h>
-#include <linux/if_arp.h>
-
 #include "vhost.h"
 
 enum {
@@ -64,7 +60,7 @@ static int vhost_poll_wakeup(wait_queue_t *wait, unsigned mode, int sync,
 	return 0;
 }
 
-static void vhost_work_init(struct vhost_work *work, vhost_work_fn_t fn)
+void vhost_work_init(struct vhost_work *work, vhost_work_fn_t fn)
 {
 	INIT_LIST_HEAD(&work->node);
 	work->fn = fn;
@@ -81,26 +77,38 @@ void vhost_poll_init(struct vhost_poll *poll, vhost_work_fn_t fn,
 	init_poll_funcptr(&poll->table, vhost_poll_func);
 	poll->mask = mask;
 	poll->dev = dev;
+	poll->wqh = NULL;
 
 	vhost_work_init(&poll->work, fn);
 }
 
 /* Start polling a file. We add ourselves to file's wait queue. The caller must
  * keep a reference to a file until after vhost_poll_stop is called. */
-void vhost_poll_start(struct vhost_poll *poll, struct file *file)
+int vhost_poll_start(struct vhost_poll *poll, struct file *file)
 {
 	unsigned long mask;
+	int ret = 0;
 
 	mask = file->f_op->poll(file, &poll->table);
 	if (mask)
 		vhost_poll_wakeup(&poll->wait, 0, 0, (void *)mask);
+	if (mask & POLLERR) {
+		if (poll->wqh)
+			remove_wait_queue(poll->wqh, &poll->wait);
+		ret = -EINVAL;
+	}
+
+	return ret;
 }
 
 /* Stop polling a file. After this function returns, it becomes safe to drop the
  * file reference. You must also flush afterwards. */
 void vhost_poll_stop(struct vhost_poll *poll)
 {
-	remove_wait_queue(poll->wqh, &poll->wait);
+	if (poll->wqh) {
+		remove_wait_queue(poll->wqh, &poll->wait);
+		poll->wqh = NULL;
+	}
 }
 
 static bool vhost_work_seq_done(struct vhost_dev *dev, struct vhost_work *work,
@@ -137,8 +145,7 @@ void vhost_poll_flush(struct vhost_poll *poll)
 	vhost_work_flush(poll->dev, &poll->work);
 }
 
-static inline void vhost_work_queue(struct vhost_dev *dev,
-				    struct vhost_work *work)
+void vhost_work_queue(struct vhost_dev *dev, struct vhost_work *work)
 {
 	unsigned long flags;
 
@@ -191,7 +198,9 @@ static int vhost_worker(void *data)
 	struct vhost_dev *dev = data;
 	struct vhost_work *work = NULL;
 	unsigned uninitialized_var(seq);
+	mm_segment_t oldfs = get_fs();
 
+	set_fs(USER_DS);
 	use_mm(dev->mm);
 
 	for (;;) {
@@ -222,11 +231,14 @@ static int vhost_worker(void *data)
 		if (work) {
 			__set_current_state(TASK_RUNNING);
 			work->fn(work);
+			if (need_resched())
+				schedule();
 		} else
 			schedule();
 
 	}
 	unuse_mm(dev->mm);
+	set_fs(oldfs);
 	return 0;
 }
 
@@ -403,39 +415,14 @@ long vhost_dev_reset_owner(struct vhost_dev *dev)
 	if (!memory)
 		return -ENOMEM;
 
-	vhost_dev_cleanup(dev);
+	vhost_dev_cleanup(dev, true);
 
 	memory->nregions = 0;
 	RCU_INIT_POINTER(dev->memory, memory);
 	return 0;
 }
 
-/* In case of DMA done not in order in lower device driver for some reason.
- * upend_idx is used to track end of used idx, done_idx is used to track head
- * of used idx. Once lower device DMA done contiguously, we will signal KVM
- * guest used idx.
- */
-int vhost_zerocopy_signal_used(struct vhost_virtqueue *vq)
-{
-	int i;
-	int j = 0;
-
-	for (i = vq->done_idx; i != vq->upend_idx; i = (i + 1) % UIO_MAXIOV) {
-		if ((vq->heads[i].len == VHOST_DMA_DONE_LEN)) {
-			vq->heads[i].len = VHOST_DMA_CLEAR_LEN;
-			vhost_add_used_and_signal(vq->dev, vq,
-						  vq->heads[i].id, 0);
-			++j;
-		} else
-			break;
-	}
-	if (j)
-		vq->done_idx = i;
-	return j;
-}
-
-/* Caller should have device mutex */
-void vhost_dev_cleanup(struct vhost_dev *dev)
+void vhost_dev_stop(struct vhost_dev *dev)
 {
 	int i;
 
@@ -444,13 +431,15 @@ void vhost_dev_cleanup(struct vhost_dev *dev)
 			vhost_poll_stop(&dev->vqs[i].poll);
 			vhost_poll_flush(&dev->vqs[i].poll);
 		}
-		/* Wait for all lower device DMAs done. */
-		if (dev->vqs[i].ubufs)
-			vhost_ubuf_put_and_wait(dev->vqs[i].ubufs);
+	}
+}
 
-		/* Signal guest as appropriate. */
-		vhost_zerocopy_signal_used(&dev->vqs[i]);
+/* Caller should have device mutex if and only if locked is set */
+void vhost_dev_cleanup(struct vhost_dev *dev, bool locked)
+{
+	int i;
 
+	for (i = 0; i < dev->nvqs; ++i) {
 		if (dev->vqs[i].error_ctx)
 			eventfd_ctx_put(dev->vqs[i].error_ctx);
 		if (dev->vqs[i].error)
@@ -472,7 +461,8 @@ void vhost_dev_cleanup(struct vhost_dev *dev)
 	dev->log_file = NULL;
 	/* No one will access memory at this point */
 	kfree(rcu_dereference_protected(dev->memory,
-					lockdep_is_held(&dev->mutex)));
+					locked ==
+						lockdep_is_held(&dev->mutex)));
 	RCU_INIT_POINTER(dev->memory, NULL);
 	WARN_ON(!list_empty(&dev->work_list));
 	if (dev->worker) {
@@ -629,10 +619,10 @@ static long vhost_set_memory(struct vhost_dev *d, struct vhost_memory __user *m)
 	return 0;
 }
 
-static long vhost_set_vring(struct vhost_dev *d, int ioctl, void __user *argp)
+long vhost_vring_ioctl(struct vhost_dev *d, int ioctl, void __user *argp)
 {
-	struct file *eventfp, *filep = NULL,
-		    *pollstart = NULL, *pollstop = NULL;
+	struct file *eventfp, *filep = NULL;
+	bool pollstart = false, pollstop = false;
 	struct eventfd_ctx *ctx = NULL;
 	u32 __user *idxp = argp;
 	struct vhost_virtqueue *vq;
@@ -758,8 +748,8 @@ static long vhost_set_vring(struct vhost_dev *d, int ioctl, void __user *argp)
 			break;
 		}
 		if (eventfp != vq->kick) {
-			pollstop = filep = vq->kick;
-			pollstart = vq->kick = eventfp;
+			pollstop = (filep = vq->kick) != NULL;
+			pollstart = (vq->kick = eventfp) != NULL;
 		} else
 			filep = eventfp;
 		break;
@@ -814,7 +804,7 @@ static long vhost_set_vring(struct vhost_dev *d, int ioctl, void __user *argp)
 		fput(filep);
 
 	if (pollstart && vq->handle_kick)
-		vhost_poll_start(&vq->poll, vq->kick);
+		r = vhost_poll_start(&vq->poll, vq->kick);
 
 	mutex_unlock(&vq->mutex);
 
@@ -824,9 +814,8 @@ static long vhost_set_vring(struct vhost_dev *d, int ioctl, void __user *argp)
 }
 
 /* Caller must have device mutex */
-long vhost_dev_ioctl(struct vhost_dev *d, unsigned int ioctl, unsigned long arg)
+long vhost_dev_ioctl(struct vhost_dev *d, unsigned int ioctl, void __user *argp)
 {
-	void __user *argp = (void __user *)arg;
 	struct file *eventfp, *filep = NULL;
 	struct eventfd_ctx *ctx = NULL;
 	u64 p;
@@ -897,7 +886,7 @@ long vhost_dev_ioctl(struct vhost_dev *d, unsigned int ioctl, unsigned long arg)
 			fput(filep);
 		break;
 	default:
-		r = vhost_set_vring(d, ioctl, argp);
+		r = -ENOIOCTLCMD;
 		break;
 	}
 done:
@@ -937,9 +926,9 @@ static int set_bit_to_user(int nr, void __user *addr)
 	if (r < 0)
 		return r;
 	BUG_ON(r != 1);
-	base = kmap_atomic(page, KM_USER0);
+	base = kmap_atomic(page);
 	set_bit(bit, base);
-	kunmap_atomic(base, KM_USER0);
+	kunmap_atomic(base);
 	set_page_dirty_lock(page);
 	put_page(page);
 	return 0;
@@ -1071,7 +1060,7 @@ static int translate_desc(struct vhost_dev *dev, u64 addr, u32 len,
 		}
 		_iov = iov + ret;
 		size = reg->memory_size - addr + reg->guest_phys_addr;
-		_iov->iov_len = min((u64)len, size);
+		_iov->iov_len = min((u64)len - s, size);
 		_iov->iov_base = (void __user *)(unsigned long)
 			(reg->userspace_addr + addr - reg->guest_phys_addr);
 		s += size;
@@ -1593,15 +1582,4 @@ void vhost_ubuf_put_and_wait(struct vhost_ubuf_ref *ubufs)
 	kref_put(&ubufs->kref, vhost_zerocopy_done_signal);
 	wait_event(ubufs->wait, !atomic_read(&ubufs->kref.refcount));
 	kfree(ubufs);
-}
-
-void vhost_zerocopy_callback(void *arg)
-{
-	struct ubuf_info *ubuf = arg;
-	struct vhost_ubuf_ref *ubufs = ubuf->arg;
-	struct vhost_virtqueue *vq = ubufs->vq;
-
-	/* set len = 1 to mark this desc buffers done DMA */
-	vq->heads[ubuf->desc].len = VHOST_DMA_DONE_LEN;
-	kref_put(&ubufs->kref, vhost_zerocopy_done_signal);
 }

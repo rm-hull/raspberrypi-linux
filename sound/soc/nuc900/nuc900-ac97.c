@@ -291,7 +291,7 @@ static int nuc900_ac97_remove(struct snd_soc_dai *dai)
 	return 0;
 }
 
-static struct snd_soc_dai_ops nuc900_ac97_dai_ops = {
+static const struct snd_soc_dai_ops nuc900_ac97_dai_ops = {
 	.trigger	= nuc900_ac97_trigger,
 };
 
@@ -314,7 +314,7 @@ static struct snd_soc_dai_driver nuc900_ac97_dai = {
 	.ops = &nuc900_ac97_dai_ops,
 };
 
-static int __devinit nuc900_ac97_drvprobe(struct platform_device *pdev)
+static int nuc900_ac97_drvprobe(struct platform_device *pdev)
 {
 	struct nuc900_audio *nuc900_audio;
 	int ret;
@@ -366,7 +366,7 @@ static int __devinit nuc900_ac97_drvprobe(struct platform_device *pdev)
 		goto out3;
 
 	/* enbale ac97 multifunction pin */
-	mfp_set_groupg(nuc900_audio->dev, "nuc900-audio");
+	mfp_set_groupg(nuc900_audio->dev, NULL);
 
 	return 0;
 
@@ -382,7 +382,7 @@ out0:
 	return ret;
 }
 
-static int __devexit nuc900_ac97_drvremove(struct platform_device *pdev)
+static int nuc900_ac97_drvremove(struct platform_device *pdev)
 {
 	snd_soc_unregister_dai(&pdev->dev);
 
@@ -403,21 +403,10 @@ static struct platform_driver nuc900_ac97_driver = {
 		.owner	= THIS_MODULE,
 	},
 	.probe		= nuc900_ac97_drvprobe,
-	.remove		= __devexit_p(nuc900_ac97_drvremove),
+	.remove		= nuc900_ac97_drvremove,
 };
 
-static int __init nuc900_ac97_init(void)
-{
-	return platform_driver_register(&nuc900_ac97_driver);
-}
-
-static void __exit nuc900_ac97_exit(void)
-{
-	platform_driver_unregister(&nuc900_ac97_driver);
-}
-
-module_init(nuc900_ac97_init);
-module_exit(nuc900_ac97_exit);
+module_platform_driver(nuc900_ac97_driver);
 
 MODULE_AUTHOR("Wan ZongShun <mcuos.com@gmail.com>");
 MODULE_DESCRIPTION("NUC900 AC97 SoC driver!");

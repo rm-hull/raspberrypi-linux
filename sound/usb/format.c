@@ -155,7 +155,7 @@ static int parse_audio_format_rates_v1(struct snd_usb_audio *chip, struct audiof
 	if (fmt[0] < offset + 1 + 3 * (nr_rates ? nr_rates : 2)) {
 		snd_printk(KERN_ERR "%d:%u:%d : invalid UAC_FORMAT_TYPE desc\n",
 				   chip->dev->devnum, fp->iface, fp->altsetting);
-		return -1;
+		return -EINVAL;
 	}
 
 	if (nr_rates) {
@@ -167,7 +167,7 @@ static int parse_audio_format_rates_v1(struct snd_usb_audio *chip, struct audiof
 		fp->rate_table = kmalloc(sizeof(int) * nr_rates, GFP_KERNEL);
 		if (fp->rate_table == NULL) {
 			snd_printk(KERN_ERR "cannot malloc\n");
-			return -1;
+			return -ENOMEM;
 		}
 
 		fp->nr_rates = 0;
@@ -198,7 +198,7 @@ static int parse_audio_format_rates_v1(struct snd_usb_audio *chip, struct audiof
 		}
 		if (!fp->nr_rates) {
 			hwc_debug("All rates were zero. Skipping format!\n");
-			return -1;
+			return -EINVAL;
 		}
 	} else {
 		/* continuous rates */
@@ -226,7 +226,7 @@ static int parse_uac2_sample_rate_range(struct audioformat *fp, int nr_triplets,
 		int min = combine_quad(&data[2 + 12 * i]);
 		int max = combine_quad(&data[6 + 12 * i]);
 		int res = combine_quad(&data[10 + 12 * i]);
-		int rate;
+		unsigned int rate;
 
 		if ((max < 0) || (min < 0) || (res < 0) || (max < min))
 			continue;
@@ -253,6 +253,10 @@ static int parse_uac2_sample_rate_range(struct audioformat *fp, int nr_triplets,
 			fp->rates |= snd_pcm_rate_to_rate_bit(rate);
 
 			nr_rates++;
+			if (nr_rates >= MAX_NR_RATES) {
+				snd_printk(KERN_ERR "invalid uac2 rates\n");
+				break;
+			}
 
 			/* avoid endless loop */
 			if (res == 0)
@@ -379,7 +383,7 @@ static int parse_audio_format_i(struct snd_usb_audio *chip,
 		fp->formats = parse_audio_format_i_type(chip, fp, format,
 							fmt, protocol);
 		if (!fp->formats)
-			return -1;
+			return -EINVAL;
 	}
 
 	/* gather possible sample rates */
@@ -405,7 +409,7 @@ static int parse_audio_format_i(struct snd_usb_audio *chip,
 	if (fp->channels < 1) {
 		snd_printk(KERN_ERR "%d:%u:%d : invalid channels %d\n",
 			   chip->dev->devnum, fp->iface, fp->altsetting, fp->channels);
-		return -1;
+		return -EINVAL;
 	}
 
 	return ret;

@@ -30,6 +30,11 @@
 #define HCI_MAX_EVENT_SIZE	260
 #define HCI_MAX_FRAME_SIZE	(HCI_MAX_ACL_SIZE + 4)
 
+#define HCI_LINK_KEY_SIZE	16
+#define HCI_AMP_LINK_KEY_SIZE	(2 * HCI_LINK_KEY_SIZE)
+
+#define HCI_MAX_AMP_ASSOC_SIZE	672
+
 /* HCI dev events */
 #define HCI_DEV_REG			1
 #define HCI_DEV_UNREG			2
@@ -56,9 +61,21 @@
 #define HCI_BREDR	0x00
 #define HCI_AMP		0x01
 
+/* First BR/EDR Controller shall have ID = 0 */
+#define HCI_BREDR_ID	0
+
+/* AMP controller status */
+#define AMP_CTRL_POWERED_DOWN			0x00
+#define AMP_CTRL_BLUETOOTH_ONLY			0x01
+#define AMP_CTRL_NO_CAPACITY			0x02
+#define AMP_CTRL_LOW_CAPACITY			0x03
+#define AMP_CTRL_MEDIUM_CAPACITY		0x04
+#define AMP_CTRL_HIGH_CAPACITY			0x05
+#define AMP_CTRL_FULL_CAPACITY			0x06
+
 /* HCI device quirks */
 enum {
-	HCI_QUIRK_NO_RESET,
+	HCI_QUIRK_RESET_ON_CLOSE,
 	HCI_QUIRK_RAW_DEVICE,
 	HCI_QUIRK_FIXUP_BUFFER_SIZE
 };
@@ -77,14 +94,6 @@ enum {
 
 	HCI_RAW,
 
-	HCI_SETUP,
-	HCI_AUTO_OFF,
-	HCI_MGMT,
-	HCI_PAIRABLE,
-	HCI_SERVICE_CACHE,
-	HCI_LINK_KEYS,
-	HCI_DEBUG_KEYS,
-
 	HCI_RESET,
 };
 
@@ -93,7 +102,25 @@ enum {
  * states from the controller.
  */
 enum {
+	HCI_SETUP,
+	HCI_AUTO_OFF,
+	HCI_MGMT,
+	HCI_PAIRABLE,
+	HCI_SERVICE_CACHE,
+	HCI_LINK_KEYS,
+	HCI_DEBUG_KEYS,
+	HCI_UNREGISTER,
+
 	HCI_LE_SCAN,
+	HCI_SSP_ENABLED,
+	HCI_HS_ENABLED,
+	HCI_LE_ENABLED,
+	HCI_LE_PERIPHERAL,
+	HCI_CONNECTABLE,
+	HCI_DISCOVERABLE,
+	HCI_LINK_SECURITY,
+	HCI_PENDING_CLASS,
+	HCI_PERIODIC_INQ,
 };
 
 /* HCI ioctl defines */
@@ -124,12 +151,12 @@ enum {
 #define HCIINQUIRY	_IOR('H', 240, int)
 
 /* HCI timeouts */
-#define HCI_CONNECT_TIMEOUT	(40000)	/* 40 seconds */
-#define HCI_DISCONN_TIMEOUT	(2000)	/* 2 seconds */
-#define HCI_PAIRING_TIMEOUT	(60000)	/* 60 seconds */
-#define HCI_IDLE_TIMEOUT	(6000)	/* 6 seconds */
-#define HCI_INIT_TIMEOUT	(10000)	/* 10 seconds */
-#define HCI_CMD_TIMEOUT		(1000)	/* 1 seconds */
+#define HCI_DISCONN_TIMEOUT	msecs_to_jiffies(2000)	/* 2 seconds */
+#define HCI_PAIRING_TIMEOUT	msecs_to_jiffies(60000)	/* 60 seconds */
+#define HCI_INIT_TIMEOUT	msecs_to_jiffies(10000)	/* 10 seconds */
+#define HCI_CMD_TIMEOUT		msecs_to_jiffies(2000)	/* 2 seconds */
+#define HCI_ACL_TX_TIMEOUT	msecs_to_jiffies(45000)	/* 45 seconds */
+#define HCI_AUTO_OFF_TIMEOUT	msecs_to_jiffies(2000)	/* 2 seconds */
 
 /* HCI data types */
 #define HCI_COMMAND_PKT		0x01
@@ -172,6 +199,7 @@ enum {
 #define ACL_START_NO_FLUSH	0x00
 #define ACL_CONT		0x01
 #define ACL_START		0x02
+#define ACL_COMPLETE		0x03
 #define ACL_ACTIVE_BCAST	0x04
 #define ACL_PICO_BCAST		0x08
 
@@ -181,6 +209,7 @@ enum {
 #define ESCO_LINK	0x02
 /* Low Energy links do not have defined link type. Use invented one */
 #define LE_LINK		0x80
+#define AMP_LINK	0x81
 
 /* LMP features */
 #define LMP_3SLOT	0x01
@@ -229,7 +258,9 @@ enum {
 #define LMP_EXTFEATURES	0x80
 
 /* Extended LMP features */
-#define LMP_HOST_LE	0x02
+#define LMP_HOST_SSP		0x01
+#define LMP_HOST_LE		0x02
+#define LMP_HOST_LE_BREDR	0x04
 
 /* Connection modes */
 #define HCI_CM_ACTIVE	0x0000
@@ -268,21 +299,51 @@ enum {
 #define HCI_LK_UNAUTH_COMBINATION	0x04
 #define HCI_LK_AUTH_COMBINATION		0x05
 #define HCI_LK_CHANGED_COMBINATION	0x06
-/* The spec doesn't define types for SMP keys */
-#define HCI_LK_SMP_LTK			0x81
-#define HCI_LK_SMP_IRK			0x82
-#define HCI_LK_SMP_CSRK			0x83
+/* The spec doesn't define types for SMP keys, the _MASTER suffix is implied */
+#define HCI_SMP_STK			0x80
+#define HCI_SMP_STK_SLAVE		0x81
+#define HCI_SMP_LTK			0x82
+#define HCI_SMP_LTK_SLAVE		0x83
 
 /* ---- HCI Error Codes ---- */
 #define HCI_ERROR_AUTH_FAILURE		0x05
+#define HCI_ERROR_CONNECTION_TIMEOUT	0x08
 #define HCI_ERROR_REJ_BAD_ADDR		0x0f
 #define HCI_ERROR_REMOTE_USER_TERM	0x13
+#define HCI_ERROR_REMOTE_LOW_RESOURCES	0x14
+#define HCI_ERROR_REMOTE_POWER_OFF	0x15
 #define HCI_ERROR_LOCAL_HOST_TERM	0x16
 #define HCI_ERROR_PAIRING_NOT_ALLOWED	0x18
 
 /* Flow control modes */
 #define HCI_FLOW_CTL_MODE_PACKET_BASED	0x00
 #define HCI_FLOW_CTL_MODE_BLOCK_BASED	0x01
+
+/* The core spec defines 127 as the "not available" value */
+#define HCI_TX_POWER_INVALID	127
+
+/* Extended Inquiry Response field types */
+#define EIR_FLAGS		0x01 /* flags */
+#define EIR_UUID16_SOME		0x02 /* 16-bit UUID, more available */
+#define EIR_UUID16_ALL		0x03 /* 16-bit UUID, all listed */
+#define EIR_UUID32_SOME		0x04 /* 32-bit UUID, more available */
+#define EIR_UUID32_ALL		0x05 /* 32-bit UUID, all listed */
+#define EIR_UUID128_SOME	0x06 /* 128-bit UUID, more available */
+#define EIR_UUID128_ALL		0x07 /* 128-bit UUID, all listed */
+#define EIR_NAME_SHORT		0x08 /* shortened local name */
+#define EIR_NAME_COMPLETE	0x09 /* complete local name */
+#define EIR_TX_POWER		0x0A /* transmit power level */
+#define EIR_CLASS_OF_DEV	0x0D /* Class of Device */
+#define EIR_SSP_HASH_C		0x0E /* Simple Pairing Hash C */
+#define EIR_SSP_RAND_R		0x0F /* Simple Pairing Randomizer R */
+#define EIR_DEVICE_ID		0x10 /* device ID */
+
+/* Low Energy Advertising Flags */
+#define LE_AD_LIMITED		0x01 /* Limited Discoverable */
+#define LE_AD_GENERAL		0x02 /* General Discoverable */
+#define LE_AD_NO_BREDR		0x04 /* BR/EDR not supported */
+#define LE_AD_SIM_LE_BREDR_CTRL	0x08 /* Simultaneous LE & BR/EDR Controller */
+#define LE_AD_SIM_LE_BREDR_HOST	0x10 /* Simultaneous LE & BR/EDR Host */
 
 /* -----  HCI Commands ---- */
 #define HCI_OP_NOP			0x0000
@@ -295,6 +356,8 @@ struct hci_cp_inquiry {
 } __packed;
 
 #define HCI_OP_INQUIRY_CANCEL		0x0402
+
+#define HCI_OP_PERIODIC_INQ		0x0403
 
 #define HCI_OP_EXIT_PERIODIC_INQ	0x0404
 
@@ -340,7 +403,7 @@ struct hci_cp_reject_conn_req {
 #define HCI_OP_LINK_KEY_REPLY		0x040b
 struct hci_cp_link_key_reply {
 	bdaddr_t bdaddr;
-	__u8     link_key[16];
+	__u8     link_key[HCI_LINK_KEY_SIZE];
 } __packed;
 
 #define HCI_OP_LINK_KEY_NEG_REPLY	0x040c
@@ -490,6 +553,62 @@ struct hci_cp_remote_oob_data_neg_reply {
 struct hci_cp_io_capability_neg_reply {
 	bdaddr_t bdaddr;
 	__u8     reason;
+} __packed;
+
+#define HCI_OP_CREATE_PHY_LINK		0x0435
+struct hci_cp_create_phy_link {
+	__u8     phy_handle;
+	__u8     key_len;
+	__u8     key_type;
+	__u8     key[HCI_AMP_LINK_KEY_SIZE];
+} __packed;
+
+#define HCI_OP_ACCEPT_PHY_LINK		0x0436
+struct hci_cp_accept_phy_link {
+	__u8     phy_handle;
+	__u8     key_len;
+	__u8     key_type;
+	__u8     key[HCI_AMP_LINK_KEY_SIZE];
+} __packed;
+
+#define HCI_OP_DISCONN_PHY_LINK		0x0437
+struct hci_cp_disconn_phy_link {
+	__u8     phy_handle;
+	__u8     reason;
+} __packed;
+
+struct ext_flow_spec {
+	__u8       id;
+	__u8       stype;
+	__le16     msdu;
+	__le32     sdu_itime;
+	__le32     acc_lat;
+	__le32     flush_to;
+} __packed;
+
+#define HCI_OP_CREATE_LOGICAL_LINK	0x0438
+#define HCI_OP_ACCEPT_LOGICAL_LINK	0x0439
+struct hci_cp_create_accept_logical_link {
+	__u8                  phy_handle;
+	struct ext_flow_spec  tx_flow_spec;
+	struct ext_flow_spec  rx_flow_spec;
+} __packed;
+
+#define HCI_OP_DISCONN_LOGICAL_LINK	0x043a
+struct hci_cp_disconn_logical_link {
+	__le16   log_handle;
+} __packed;
+
+#define HCI_OP_LOGICAL_LINK_CANCEL	0x043b
+struct hci_cp_logical_link_cancel {
+	__u8     phy_handle;
+	__u8     flow_spec_id;
+} __packed;
+
+struct hci_rp_logical_link_cancel {
+	__u8     status;
+	__u8     phy_handle;
+	__u8     flow_spec_id;
 } __packed;
 
 #define HCI_OP_SNIFF_MODE		0x0803
@@ -666,8 +785,8 @@ struct hci_cp_host_buffer_size {
 
 #define HCI_OP_WRITE_EIR		0x0c52
 struct hci_cp_write_eir {
-	uint8_t		fec;
-	uint8_t		data[HCI_MAX_EIR_LENGTH];
+	__u8	fec;
+	__u8	data[HCI_MAX_EIR_LENGTH];
 } __packed;
 
 #define HCI_OP_READ_SSP_MODE		0x0c55
@@ -689,6 +808,10 @@ struct hci_rp_read_local_oob_data {
 } __packed;
 
 #define HCI_OP_READ_INQ_RSP_TX_POWER	0x0c58
+struct hci_rp_read_inq_rsp_tx_power {
+	__u8     status;
+	__s8     tx_power;
+} __packed;
 
 #define HCI_OP_READ_FLOW_CONTROL_MODE	0x0c66
 struct hci_rp_read_flow_control_mode {
@@ -698,8 +821,8 @@ struct hci_rp_read_flow_control_mode {
 
 #define HCI_OP_WRITE_LE_HOST_SUPPORTED	0x0c6d
 struct hci_cp_write_le_host_supported {
-	__u8 le;
-	__u8 simul;
+	__u8	le;
+	__u8	simul;
 } __packed;
 
 #define HCI_OP_READ_LOCAL_VERSION	0x1001
@@ -783,6 +906,31 @@ struct hci_rp_read_local_amp_info {
 	__le32   be_flush_to;
 } __packed;
 
+#define HCI_OP_READ_LOCAL_AMP_ASSOC	0x140a
+struct hci_cp_read_local_amp_assoc {
+	__u8     phy_handle;
+	__le16   len_so_far;
+	__le16   max_len;
+} __packed;
+struct hci_rp_read_local_amp_assoc {
+	__u8     status;
+	__u8     phy_handle;
+	__le16   rem_len;
+	__u8     frag[0];
+} __packed;
+
+#define HCI_OP_WRITE_REMOTE_AMP_ASSOC	0x140b
+struct hci_cp_write_remote_amp_assoc {
+	__u8     phy_handle;
+	__le16   len_so_far;
+	__le16   rem_len;
+	__u8     frag[0];
+} __packed;
+struct hci_rp_write_remote_amp_assoc {
+	__u8     status;
+	__u8     phy_handle;
+} __packed;
+
 #define HCI_OP_LE_SET_EVENT_MASK	0x2001
 struct hci_cp_le_set_event_mask {
 	__u8     mask[8];
@@ -794,6 +942,28 @@ struct hci_rp_le_read_buffer_size {
 	__le16   le_mtu;
 	__u8     le_max_pkt;
 } __packed;
+
+#define HCI_OP_LE_READ_LOCAL_FEATURES	0x2003
+struct hci_rp_le_read_local_features {
+	__u8     status;
+	__u8     features[8];
+} __packed;
+
+#define HCI_OP_LE_READ_ADV_TX_POWER	0x2007
+struct hci_rp_le_read_adv_tx_power {
+	__u8	status;
+	__s8	tx_power;
+} __packed;
+
+#define HCI_MAX_AD_LENGTH		31
+
+#define HCI_OP_LE_SET_ADV_DATA		0x2008
+struct hci_cp_le_set_adv_data {
+	__u8	length;
+	__u8	data[HCI_MAX_AD_LENGTH];
+} __packed;
+
+#define HCI_OP_LE_SET_ADV_ENABLE	0x200a
 
 #define HCI_OP_LE_SET_SCAN_PARAM	0x200b
 struct hci_cp_le_set_scan_param {
@@ -831,6 +1001,12 @@ struct hci_cp_le_create_conn {
 
 #define HCI_OP_LE_CREATE_CONN_CANCEL	0x200e
 
+#define HCI_OP_LE_READ_WHITE_LIST_SIZE	0x200f
+struct hci_rp_le_read_white_list_size {
+	__u8	status;
+	__u8	size;
+} __packed;
+
 #define HCI_OP_LE_CONN_UPDATE		0x2013
 struct hci_cp_le_conn_update {
 	__le16   handle;
@@ -867,6 +1043,12 @@ struct hci_cp_le_ltk_neg_reply {
 struct hci_rp_le_ltk_neg_reply {
 	__u8	status;
 	__le16	handle;
+} __packed;
+
+#define HCI_OP_LE_READ_SUPPORTED_STATES	0x201c
+struct hci_rp_le_read_supported_states {
+	__u8	status;
+	__u8	le_states[8];
 } __packed;
 
 /* ---- HCI Events ---- */
@@ -1013,7 +1195,7 @@ struct hci_ev_link_key_req {
 #define HCI_EV_LINK_KEY_NOTIFY		0x18
 struct hci_ev_link_key_notify {
 	bdaddr_t bdaddr;
-	__u8     link_key[16];
+	__u8     link_key[HCI_LINK_KEY_SIZE];
 	__u8     key_type;
 } __packed;
 
@@ -1109,6 +1291,12 @@ struct extended_inquiry_info {
 	__u8     data[240];
 } __packed;
 
+#define HCI_EV_KEY_REFRESH_COMPLETE	0x30
+struct hci_ev_key_refresh_complete {
+	__u8	status;
+	__le16	handle;
+} __packed;
+
 #define HCI_EV_IO_CAPA_REQUEST		0x31
 struct hci_ev_io_capa_request {
 	bdaddr_t bdaddr;
@@ -1144,6 +1332,24 @@ struct hci_ev_simple_pair_complete {
 	bdaddr_t bdaddr;
 } __packed;
 
+#define HCI_EV_USER_PASSKEY_NOTIFY	0x3b
+struct hci_ev_user_passkey_notify {
+	bdaddr_t	bdaddr;
+	__le32		passkey;
+} __packed;
+
+#define HCI_KEYPRESS_STARTED		0
+#define HCI_KEYPRESS_ENTERED		1
+#define HCI_KEYPRESS_ERASED		2
+#define HCI_KEYPRESS_CLEARED		3
+#define HCI_KEYPRESS_COMPLETED		4
+
+#define HCI_EV_KEYPRESS_NOTIFY		0x3c
+struct hci_ev_keypress_notify {
+	bdaddr_t	bdaddr;
+	__u8		type;
+} __packed;
+
 #define HCI_EV_REMOTE_HOST_FEATURES	0x3d
 struct hci_ev_remote_host_features {
 	bdaddr_t bdaddr;
@@ -1155,7 +1361,55 @@ struct hci_ev_le_meta {
 	__u8     subevent;
 } __packed;
 
+#define HCI_EV_PHY_LINK_COMPLETE	0x40
+struct hci_ev_phy_link_complete {
+	__u8     status;
+	__u8     phy_handle;
+} __packed;
+
+#define HCI_EV_CHANNEL_SELECTED		0x41
+struct hci_ev_channel_selected {
+	__u8     phy_handle;
+} __packed;
+
+#define HCI_EV_DISCONN_PHY_LINK_COMPLETE	0x42
+struct hci_ev_disconn_phy_link_complete {
+	__u8     status;
+	__u8     phy_handle;
+	__u8     reason;
+} __packed;
+
+#define HCI_EV_LOGICAL_LINK_COMPLETE		0x45
+struct hci_ev_logical_link_complete {
+	__u8     status;
+	__le16   handle;
+	__u8     phy_handle;
+	__u8     flow_spec_id;
+} __packed;
+
+#define HCI_EV_DISCONN_LOGICAL_LINK_COMPLETE	0x46
+struct hci_ev_disconn_logical_link_complete {
+	__u8     status;
+	__le16   handle;
+	__u8     reason;
+} __packed;
+
+#define HCI_EV_NUM_COMP_BLOCKS		0x48
+struct hci_comp_blocks_info {
+	__le16   handle;
+	__le16   pkts;
+	__le16   blocks;
+} __packed;
+
+struct hci_ev_num_comp_blocks {
+	__le16   num_blocks;
+	__u8     num_hndl;
+	struct hci_comp_blocks_info handles[0];
+} __packed;
+
 /* Low energy meta events */
+#define LE_CONN_ROLE_MASTER	0x00
+
 #define HCI_EV_LE_CONN_COMPLETE		0x01
 struct hci_ev_le_conn_complete {
 	__u8     status;
@@ -1242,7 +1496,6 @@ struct hci_sco_hdr {
 	__u8	dlen;
 } __packed;
 
-#include <linux/skbuff.h>
 static inline struct hci_event_hdr *hci_event_hdr(const struct sk_buff *skb)
 {
 	return (struct hci_event_hdr *) skb->data;
@@ -1259,12 +1512,12 @@ static inline struct hci_sco_hdr *hci_sco_hdr(const struct sk_buff *skb)
 }
 
 /* Command opcode pack/unpack */
-#define hci_opcode_pack(ogf, ocf)	(__u16) ((ocf & 0x03ff)|(ogf << 10))
+#define hci_opcode_pack(ogf, ocf)	((__u16) ((ocf & 0x03ff)|(ogf << 10)))
 #define hci_opcode_ogf(op)		(op >> 10)
 #define hci_opcode_ocf(op)		(op & 0x03ff)
 
 /* ACL handle and flags pack/unpack */
-#define hci_handle_pack(h, f)	(__u16) ((h & 0x0fff)|(f << 12))
+#define hci_handle_pack(h, f)	((__u16) ((h & 0x0fff)|(f << 12)))
 #define hci_handle(h)		(h & 0x0fff)
 #define hci_flags(h)		(h >> 12)
 
@@ -1287,7 +1540,8 @@ struct sockaddr_hci {
 #define HCI_DEV_NONE	0xffff
 
 #define HCI_CHANNEL_RAW		0
-#define HCI_CHANNEL_CONTROL	1
+#define HCI_CHANNEL_MONITOR	2
+#define HCI_CHANNEL_CONTROL	3
 
 struct hci_filter {
 	unsigned long type_mask;
@@ -1388,6 +1642,6 @@ struct hci_inquiry_req {
 };
 #define IREQ_CACHE_FLUSH 0x0001
 
-extern int enable_hs;
+extern bool enable_hs;
 
 #endif /* __HCI_H */

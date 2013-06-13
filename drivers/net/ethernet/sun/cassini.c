@@ -99,13 +99,12 @@
 #include <net/checksum.h>
 
 #include <linux/atomic.h>
-#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/byteorder.h>
 #include <asm/uaccess.h>
 
-#define cas_page_map(x)      kmap_atomic((x), KM_SKB_DATA_SOFTIRQ)
-#define cas_page_unmap(x)    kunmap_atomic((x), KM_SKB_DATA_SOFTIRQ)
+#define cas_page_map(x)      kmap_atomic((x))
+#define cas_page_unmap(x)    kunmap_atomic((x))
 #define CAS_NCPUS            num_online_cpus()
 
 #define cas_skb_release(x)  netif_rx(x)
@@ -186,7 +185,7 @@
 #define CAS_RESET_SPARE                 3
 #endif
 
-static char version[] __devinitdata =
+static char version[] =
 	DRV_MODULE_NAME ".c:v" DRV_MODULE_VERSION " (" DRV_MODULE_RELDATE ")\n";
 
 static int cassini_debug = -1;	/* -1 == use CAS_DEF_MSG_ENABLE as value */
@@ -223,7 +222,7 @@ static int link_transition_timeout;
 
 
 
-static u16 link_modes[] __devinitdata = {
+static u16 link_modes[] = {
 	BMCR_ANENABLE,			 /* 0 : autoneg */
 	0,				 /* 1 : 10bt half duplex */
 	BMCR_SPEED100,			 /* 2 : 100bt half duplex */
@@ -835,7 +834,6 @@ static int cas_saturn_firmware_init(struct cas *cp)
 	cp->fw_data = vmalloc(cp->fw_size);
 	if (!cp->fw_data) {
 		err = -ENOMEM;
-		pr_err("\"%s\" Failed %d\n", fw_name, err);
 		goto out;
 	}
 	memcpy(cp->fw_data, &fw->data[2], cp->fw_size);
@@ -1975,7 +1973,7 @@ static int cas_rx_process_pkt(struct cas *cp, struct cas_rx_comp *rxc,
 	else
 		alloclen = max(hlen, RX_COPY_MIN);
 
-	skb = dev_alloc_skb(alloclen + swivel + cp->crc_size);
+	skb = netdev_alloc_skb(cp->dev, alloclen + swivel + cp->crc_size);
 	if (skb == NULL)
 		return -1;
 
@@ -3892,7 +3890,7 @@ static int cas_change_mtu(struct net_device *dev, int new_mtu)
 	schedule_work(&cp->reset_task);
 #endif
 
-	flush_work_sync(&cp->reset_task);
+	flush_work(&cp->reset_task);
 	return 0;
 }
 
@@ -4822,7 +4820,7 @@ static int cas_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
  * only subordinate device and we can tweak the bridge settings to
  * reflect that fact.
  */
-static void __devinit cas_program_bridge(struct pci_dev *cas_pdev)
+static void cas_program_bridge(struct pci_dev *cas_pdev)
 {
 	struct pci_dev *pdev = cas_pdev->bus->self;
 	u32 val;
@@ -4918,8 +4916,7 @@ static const struct net_device_ops cas_netdev_ops = {
 #endif
 };
 
-static int __devinit cas_init_one(struct pci_dev *pdev,
-				  const struct pci_device_id *ent)
+static int cas_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	static int cas_version_printed = 0;
 	unsigned long casreg_len;
@@ -4947,7 +4944,6 @@ static int __devinit cas_init_one(struct pci_dev *pdev,
 
 	dev = alloc_etherdev(sizeof(*cp));
 	if (!dev) {
-		dev_err(&pdev->dev, "Etherdev alloc failed, aborting\n");
 		err = -ENOMEM;
 		goto err_out_disable_pdev;
 	}
@@ -5178,7 +5174,7 @@ err_out_disable_pdev:
 	return -ENODEV;
 }
 
-static void __devexit cas_remove_one(struct pci_dev *pdev)
+static void cas_remove_one(struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
 	struct cas *cp;
@@ -5276,7 +5272,7 @@ static struct pci_driver cas_driver = {
 	.name		= DRV_MODULE_NAME,
 	.id_table	= cas_pci_tbl,
 	.probe		= cas_init_one,
-	.remove		= __devexit_p(cas_remove_one),
+	.remove		= cas_remove_one,
 #ifdef CONFIG_PM
 	.suspend	= cas_suspend,
 	.resume		= cas_resume

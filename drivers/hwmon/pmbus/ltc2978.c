@@ -59,10 +59,10 @@ enum chips { ltc2978, ltc3880 };
 struct ltc2978_data {
 	enum chips id;
 	int vin_min, vin_max;
-	int temp_min, temp_max;
+	int temp_min, temp_max[2];
 	int vout_min[8], vout_max[8];
 	int iout_max[2];
-	int temp2_max[2];
+	int temp2_max;
 	struct pmbus_driver_info info;
 };
 
@@ -113,9 +113,10 @@ static int ltc2978_read_word_data_common(struct i2c_client *client, int page,
 		ret = pmbus_read_word_data(client, page,
 					   LTC2978_MFR_TEMPERATURE_PEAK);
 		if (ret >= 0) {
-			if (lin11_to_val(ret) > lin11_to_val(data->temp_max))
-				data->temp_max = ret;
-			ret = data->temp_max;
+			if (lin11_to_val(ret)
+			    > lin11_to_val(data->temp_max[page]))
+				data->temp_max[page] = ret;
+			ret = data->temp_max[page];
 		}
 		break;
 	case PMBUS_VIRT_RESET_VOUT_HISTORY:
@@ -204,10 +205,9 @@ static int ltc3880_read_word_data(struct i2c_client *client, int page, int reg)
 		ret = pmbus_read_word_data(client, page,
 					   LTC3880_MFR_TEMPERATURE2_PEAK);
 		if (ret >= 0) {
-			if (lin11_to_val(ret)
-			    > lin11_to_val(data->temp2_max[page]))
-				data->temp2_max[page] = ret;
-			ret = data->temp2_max[page];
+			if (lin11_to_val(ret) > lin11_to_val(data->temp2_max))
+				data->temp2_max = ret;
+			ret = data->temp2_max;
 		}
 		break;
 	case PMBUS_VIRT_READ_VIN_MIN:
@@ -248,11 +248,11 @@ static int ltc2978_write_word_data(struct i2c_client *client, int page,
 
 	switch (reg) {
 	case PMBUS_VIRT_RESET_IOUT_HISTORY:
-		data->iout_max[page] = 0x7fff;
+		data->iout_max[page] = 0x7c00;
 		ret = ltc2978_clear_peaks(client, page, data->id);
 		break;
 	case PMBUS_VIRT_RESET_TEMP2_HISTORY:
-		data->temp2_max[page] = 0x7fff;
+		data->temp2_max = 0x7c00;
 		ret = ltc2978_clear_peaks(client, page, data->id);
 		break;
 	case PMBUS_VIRT_RESET_VOUT_HISTORY:
@@ -262,12 +262,12 @@ static int ltc2978_write_word_data(struct i2c_client *client, int page,
 		break;
 	case PMBUS_VIRT_RESET_VIN_HISTORY:
 		data->vin_min = 0x7bff;
-		data->vin_max = 0;
+		data->vin_max = 0x7c00;
 		ret = ltc2978_clear_peaks(client, page, data->id);
 		break;
 	case PMBUS_VIRT_RESET_TEMP_HISTORY:
 		data->temp_min = 0x7bff;
-		data->temp_max = 0x7fff;
+		data->temp_max[page] = 0x7c00;
 		ret = ltc2978_clear_peaks(client, page, data->id);
 		break;
 	default:
@@ -287,7 +287,7 @@ MODULE_DEVICE_TABLE(i2c, ltc2978_id);
 static int ltc2978_probe(struct i2c_client *client,
 			 const struct i2c_device_id *id)
 {
-	int chip_id, ret, i;
+	int chip_id, i;
 	struct ltc2978_data *data;
 	struct pmbus_driver_info *info;
 
@@ -295,15 +295,14 @@ static int ltc2978_probe(struct i2c_client *client,
 				     I2C_FUNC_SMBUS_READ_WORD_DATA))
 		return -ENODEV;
 
-	data = kzalloc(sizeof(struct ltc2978_data), GFP_KERNEL);
+	data = devm_kzalloc(&client->dev, sizeof(struct ltc2978_data),
+			    GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
 
 	chip_id = i2c_smbus_read_word_data(client, LTC2978_MFR_SPECIAL_ID);
-	if (chip_id < 0) {
-		ret = chip_id;
-		goto err_mem;
-	}
+	if (chip_id < 0)
+		return chip_id;
 
 	if (chip_id == LTC2978_ID_REV1 || chip_id == LTC2978_ID_REV2) {
 		data->id = ltc2978;
@@ -311,8 +310,7 @@ static int ltc2978_probe(struct i2c_client *client,
 		data->id = ltc3880;
 	} else {
 		dev_err(&client->dev, "Unsupported chip ID 0x%x\n", chip_id);
-		ret = -ENODEV;
-		goto err_mem;
+		return -ENODEV;
 	}
 	if (data->id != id->driver_data)
 		dev_warn(&client->dev,
@@ -323,12 +321,14 @@ static int ltc2978_probe(struct i2c_client *client,
 	info = &data->info;
 	info->write_word_data = ltc2978_write_word_data;
 
-	data->vout_min[0] = 0xffff;
 	data->vin_min = 0x7bff;
+	data->vin_max = 0x7c00;
 	data->temp_min = 0x7bff;
-	data->temp_max = 0x7fff;
+	for (i = 0; i < ARRAY_SIZE(data->temp_max); i++)
+		data->temp_max[i] = 0x7c00;
+	data->temp2_max = 0x7c00;
 
-	switch (id->driver_data) {
+	switch (data->id) {
 	case ltc2978:
 		info->read_word_data = ltc2978_read_word_data;
 		info->pages = 8;
@@ -338,7 +338,6 @@ static int ltc2978_probe(struct i2c_client *client,
 		for (i = 1; i < 8; i++) {
 			info->func[i] = PMBUS_HAVE_VOUT
 			  | PMBUS_HAVE_STATUS_VOUT;
-			data->vout_min[i] = 0xffff;
 		}
 		break;
 	case ltc3880:
@@ -354,31 +353,16 @@ static int ltc2978_probe(struct i2c_client *client,
 		  | PMBUS_HAVE_IOUT | PMBUS_HAVE_STATUS_IOUT
 		  | PMBUS_HAVE_POUT
 		  | PMBUS_HAVE_TEMP | PMBUS_HAVE_STATUS_TEMP;
-		data->vout_min[1] = 0xffff;
+		data->iout_max[0] = 0x7c00;
+		data->iout_max[1] = 0x7c00;
 		break;
 	default:
-		ret = -ENODEV;
-		goto err_mem;
+		return -ENODEV;
 	}
+	for (i = 0; i < info->pages; i++)
+		data->vout_min[i] = 0xffff;
 
-	ret = pmbus_do_probe(client, id, info);
-	if (ret)
-		goto err_mem;
-	return 0;
-
-err_mem:
-	kfree(data);
-	return ret;
-}
-
-static int ltc2978_remove(struct i2c_client *client)
-{
-	const struct pmbus_driver_info *info = pmbus_get_driver_info(client);
-	const struct ltc2978_data *data = to_ltc2978_data(info);
-
-	pmbus_do_remove(client);
-	kfree(data);
-	return 0;
+	return pmbus_do_probe(client, id, info);
 }
 
 /* This is the driver that will be inserted */
@@ -387,22 +371,12 @@ static struct i2c_driver ltc2978_driver = {
 		   .name = "ltc2978",
 		   },
 	.probe = ltc2978_probe,
-	.remove = ltc2978_remove,
+	.remove = pmbus_do_remove,
 	.id_table = ltc2978_id,
 };
 
-static int __init ltc2978_init(void)
-{
-	return i2c_add_driver(&ltc2978_driver);
-}
-
-static void __exit ltc2978_exit(void)
-{
-	i2c_del_driver(&ltc2978_driver);
-}
+module_i2c_driver(ltc2978_driver);
 
 MODULE_AUTHOR("Guenter Roeck");
 MODULE_DESCRIPTION("PMBus driver for LTC2978 and LTC3880");
 MODULE_LICENSE("GPL");
-module_init(ltc2978_init);
-module_exit(ltc2978_exit);

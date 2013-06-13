@@ -94,8 +94,7 @@ struct sfb_skb_cb {
 
 static inline struct sfb_skb_cb *sfb_skb_cb(const struct sk_buff *skb)
 {
-	BUILD_BUG_ON(sizeof(skb->cb) <
-		sizeof(struct qdisc_skb_cb) + sizeof(struct sfb_skb_cb));
+	qdisc_cb_private_validate(skb, sizeof(struct sfb_skb_cb));
 	return (struct sfb_skb_cb *)qdisc_skb_cb(skb)->data;
 }
 
@@ -571,7 +570,10 @@ static int sfb_dump(struct Qdisc *sch, struct sk_buff *skb)
 
 	sch->qstats.backlog = q->qdisc->qstats.backlog;
 	opts = nla_nest_start(skb, TCA_OPTIONS);
-	NLA_PUT(skb, TCA_SFB_PARMS, sizeof(opt), &opt);
+	if (opts == NULL)
+		goto nla_put_failure;
+	if (nla_put(skb, TCA_SFB_PARMS, sizeof(opt), &opt))
+		goto nla_put_failure;
 	return nla_nest_end(skb, opts);
 
 nla_put_failure:

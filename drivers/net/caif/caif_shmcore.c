@@ -13,6 +13,7 @@
 #include <linux/list.h>
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
+#include <linux/io.h>
 
 #include <net/caif/caif_device.h>
 #include <net/caif/caif_shm.h>
@@ -632,9 +633,6 @@ int caif_shmcore_probe(struct shmdev_layer *pshm_dev)
 				kmalloc(sizeof(struct buf_list), GFP_KERNEL);
 
 		if (tx_buf == NULL) {
-			pr_warn("ERROR, Could not"
-					" allocate dynamic mem. for tx_buf,"
-					" Bailing out ...\n");
 			free_netdev(pshm_dev->pshm_netdev);
 			return -ENOMEM;
 		}
@@ -647,6 +645,9 @@ int caif_shmcore_probe(struct shmdev_layer *pshm_dev)
 		if (pshm_dev->shm_loopback)
 			tx_buf->desc_vptr = (unsigned char *)tx_buf->phy_addr;
 		else
+			/*
+			 * FIXME: the result of ioremap is not a pointer - arnd
+			 */
 			tx_buf->desc_vptr =
 					ioremap(tx_buf->phy_addr, TX_BUF_SZ);
 
@@ -658,9 +659,6 @@ int caif_shmcore_probe(struct shmdev_layer *pshm_dev)
 				kmalloc(sizeof(struct buf_list), GFP_KERNEL);
 
 		if (rx_buf == NULL) {
-			pr_warn("ERROR, Could not"
-					" allocate dynamic mem.for rx_buf,"
-					" Bailing out ...\n");
 			free_netdev(pshm_dev->pshm_netdev);
 			return -ENOMEM;
 		}

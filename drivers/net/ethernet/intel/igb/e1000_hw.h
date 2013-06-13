@@ -1,7 +1,7 @@
 /*******************************************************************************
 
   Intel(R) Gigabit Ethernet Linux driver
-  Copyright(c) 2007-2011 Intel Corporation.
+  Copyright(c) 2007-2013 Intel Corporation.
 
   This program is free software; you can redistribute it and/or modify it
   under the terms and conditions of the GNU General Public License,
@@ -63,6 +63,13 @@ struct e1000_hw;
 #define E1000_DEV_ID_I350_FIBER               0x1522
 #define E1000_DEV_ID_I350_SERDES              0x1523
 #define E1000_DEV_ID_I350_SGMII               0x1524
+#define E1000_DEV_ID_I210_COPPER		0x1533
+#define E1000_DEV_ID_I210_COPPER_OEM1		0x1534
+#define E1000_DEV_ID_I210_COPPER_IT		0x1535
+#define E1000_DEV_ID_I210_FIBER			0x1536
+#define E1000_DEV_ID_I210_SERDES		0x1537
+#define E1000_DEV_ID_I210_SGMII			0x1538
+#define E1000_DEV_ID_I211_COPPER		0x1539
 
 #define E1000_REVISION_2 2
 #define E1000_REVISION_4 4
@@ -83,6 +90,8 @@ enum e1000_mac_type {
 	e1000_82576,
 	e1000_82580,
 	e1000_i350,
+	e1000_i210,
+	e1000_i211,
 	e1000_num_macs  /* List is 1-based, so subtract 1 for true count. */
 };
 
@@ -117,6 +126,7 @@ enum e1000_phy_type {
 	e1000_phy_igp_3,
 	e1000_phy_ife,
 	e1000_phy_82580,
+	e1000_phy_i210,
 };
 
 enum e1000_bus_type {
@@ -313,6 +323,13 @@ struct e1000_mac_operations {
 	void (*rar_set)(struct e1000_hw *, u8 *, u32);
 	s32  (*read_mac_addr)(struct e1000_hw *);
 	s32  (*get_speed_and_duplex)(struct e1000_hw *, u16 *, u16 *);
+	s32  (*acquire_swfw_sync)(struct e1000_hw *, u16);
+	void (*release_swfw_sync)(struct e1000_hw *, u16);
+#ifdef CONFIG_IGB_HWMON
+	s32 (*get_thermal_sensor_data)(struct e1000_hw *);
+	s32 (*init_thermal_sensor_thresh)(struct e1000_hw *);
+#endif
+
 };
 
 struct e1000_phy_operations {
@@ -329,6 +346,8 @@ struct e1000_phy_operations {
 	s32  (*set_d0_lplu_state)(struct e1000_hw *, bool);
 	s32  (*set_d3_lplu_state)(struct e1000_hw *, bool);
 	s32  (*write_reg)(struct e1000_hw *, u32, u16);
+	s32 (*read_i2c_byte)(struct e1000_hw *, u8, u8, u8 *);
+	s32 (*write_i2c_byte)(struct e1000_hw *, u8, u8, u8);
 };
 
 struct e1000_nvm_operations {
@@ -338,6 +357,20 @@ struct e1000_nvm_operations {
 	s32  (*write)(struct e1000_hw *, u16, u16, u16 *);
 	s32  (*update)(struct e1000_hw *);
 	s32  (*validate)(struct e1000_hw *);
+	s32  (*valid_led_default)(struct e1000_hw *, u16 *);
+};
+
+#define E1000_MAX_SENSORS		3
+
+struct e1000_thermal_diode_data {
+	u8 location;
+	u8 temp;
+	u8 caution_thresh;
+	u8 max_op_thresh;
+};
+
+struct e1000_thermal_sensor_data {
+	struct e1000_thermal_diode_data sensor[E1000_MAX_SENSORS];
 };
 
 struct e1000_info {
@@ -385,6 +418,7 @@ struct e1000_mac_info {
 	bool report_tx_early;
 	bool serdes_has_link;
 	bool tx_pkt_filtering;
+	struct e1000_thermal_sensor_data thermal_sensor_data;
 };
 
 struct e1000_phy_info {

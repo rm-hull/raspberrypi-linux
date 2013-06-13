@@ -78,11 +78,9 @@ static int kone_send(struct usb_device *usb_dev, uint usb_command,
 	char *buf;
 	int len;
 
-	buf = kmalloc(size, GFP_KERNEL);
+	buf = kmemdup(data, size, GFP_KERNEL);
 	if (buf == NULL)
 		return -ENOMEM;
-
-	memcpy(buf, data, size);
 
 	len = usb_control_msg(usb_dev, usb_sndctrlpipe(usb_dev, 0),
 			HID_REQ_SET_REPORT,
@@ -140,7 +138,7 @@ static int kone_check_write(struct usb_device *usb_dev)
 		return 0;
 
 	/* unknown answer */
-	hid_err(usb_dev, "got retval %d when checking write\n", data);
+	dev_err(&usb_dev->dev, "got retval %d when checking write\n", data);
 	return -EIO;
 }
 
@@ -505,7 +503,7 @@ static ssize_t kone_sysfs_set_tcu(struct device *dev,
 
 		retval = kone_set_settings(usb_dev, &kone->settings);
 		if (retval) {
-			hid_err(usb_dev, "couldn't set tcu state\n");
+			dev_err(&usb_dev->dev, "couldn't set tcu state\n");
 			/*
 			 * try to reread valid settings into buffer overwriting
 			 * first error code
@@ -521,7 +519,7 @@ static ssize_t kone_sysfs_set_tcu(struct device *dev,
 
 	retval = size;
 exit_no_settings:
-	hid_err(usb_dev, "couldn't read settings\n");
+	dev_err(&usb_dev->dev, "couldn't read settings\n");
 exit_unlock:
 	mutex_unlock(&kone->kone_lock);
 	return retval;

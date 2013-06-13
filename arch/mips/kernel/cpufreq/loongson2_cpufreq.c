@@ -19,7 +19,7 @@
 
 #include <asm/clock.h>
 
-#include <loongson.h>
+#include <asm/mach-loongson/loongson.h>
 
 static uint nowait;
 
@@ -107,6 +107,8 @@ static int loongson2_cpufreq_target(struct cpufreq_policy *policy,
 static int loongson2_cpufreq_cpu_init(struct cpufreq_policy *policy)
 {
 	int i;
+	unsigned long rate;
+	int ret;
 
 	if (!cpu_online(policy->cpu))
 		return -ENODEV;
@@ -117,15 +119,22 @@ static int loongson2_cpufreq_cpu_init(struct cpufreq_policy *policy)
 		return PTR_ERR(cpuclk);
 	}
 
-	cpuclk->rate = cpu_clock_freq / 1000;
-	if (!cpuclk->rate)
+	rate = cpu_clock_freq / 1000;
+	if (!rate) {
+		clk_put(cpuclk);
 		return -EINVAL;
+	}
+	ret = clk_set_rate(cpuclk, rate);
+	if (ret) {
+		clk_put(cpuclk);
+		return ret;
+	}
 
 	/* clock table init */
 	for (i = 2;
 	     (loongson2_clockmod_table[i].frequency != CPUFREQ_TABLE_END);
 	     i++)
-		loongson2_clockmod_table[i].frequency = (cpuclk->rate * i) / 8;
+		loongson2_clockmod_table[i].frequency = (rate * i) / 8;
 
 	policy->cur = loongson2_cpufreq_get(policy->cpu);
 
@@ -180,6 +189,25 @@ static struct platform_driver platform_driver = {
 	},
 	.id_table = platform_device_ids,
 };
+
+/*
+ * This is the simple version of Loongson-2 wait, Maybe we need do this in
+ * interrupt disabled context.
+ */
+
+static DEFINE_SPINLOCK(loongson2_wait_lock);
+
+static void loongson2_cpu_wait(void)
+{
+	unsigned long flags;
+	u32 cpu_freq;
+
+	spin_lock_irqsave(&loongson2_wait_lock, flags);
+	cpu_freq = LOONGSON_CHIPCFG0;
+	LOONGSON_CHIPCFG0 &= ~0x7;	/* Put CPU into wait mode */
+	LOONGSON_CHIPCFG0 = cpu_freq;	/* Restore CPU state */
+	spin_unlock_irqrestore(&loongson2_wait_lock, flags);
+}
 
 static int __init cpufreq_init(void)
 {

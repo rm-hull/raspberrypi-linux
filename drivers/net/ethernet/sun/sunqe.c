@@ -28,7 +28,6 @@
 #include <linux/of.h>
 #include <linux/of_device.h>
 
-#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <asm/byteorder.h>
@@ -435,14 +434,14 @@ static void qe_rx(struct sunqe *qep)
 			dev->stats.rx_length_errors++;
 			dev->stats.rx_dropped++;
 		} else {
-			skb = dev_alloc_skb(len + 2);
+			skb = netdev_alloc_skb(dev, len + 2);
 			if (skb == NULL) {
 				drops++;
 				dev->stats.rx_dropped++;
 			} else {
 				skb_reserve(skb, 2);
 				skb_put(skb, len);
-				skb_copy_to_linear_data(skb, (unsigned char *) this_qbuf,
+				skb_copy_to_linear_data(skb, this_qbuf,
 						 len);
 				skb->protocol = eth_type_trans(skb, qep->dev);
 				netif_rx(skb);
@@ -686,13 +685,14 @@ static void qe_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
 	struct sunqe *qep = netdev_priv(dev);
 	struct platform_device *op;
 
-	strcpy(info->driver, "sunqe");
-	strcpy(info->version, "3.0");
+	strlcpy(info->driver, "sunqe", sizeof(info->driver));
+	strlcpy(info->version, "3.0", sizeof(info->version));
 
 	op = qep->op;
 	regs = of_get_property(op->dev.of_node, "reg", NULL);
 	if (regs)
-		sprintf(info->bus_info, "SBUS:%d", regs->which_io);
+		snprintf(info->bus_info, sizeof(info->bus_info), "SBUS:%d",
+			 regs->which_io);
 
 }
 
@@ -745,7 +745,7 @@ static void qec_init_once(struct sunqec *qecp, struct platform_device *op)
 		    qecp->gregs + GLOB_RSIZE);
 }
 
-static u8 __devinit qec_get_burst(struct device_node *dp)
+static u8 qec_get_burst(struct device_node *dp)
 {
 	u8 bsizes, bsizes_more;
 
@@ -765,7 +765,7 @@ static u8 __devinit qec_get_burst(struct device_node *dp)
 	return bsizes;
 }
 
-static struct sunqec * __devinit get_qec(struct platform_device *child)
+static struct sunqec *get_qec(struct platform_device *child)
 {
 	struct platform_device *op = to_platform_device(child->dev.parent);
 	struct sunqec *qecp;
@@ -831,7 +831,7 @@ static const struct net_device_ops qec_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 };
 
-static int __devinit qec_ether_init(struct platform_device *op)
+static int qec_ether_init(struct platform_device *op)
 {
 	static unsigned version_printed;
 	struct net_device *dev;
@@ -907,14 +907,8 @@ static int __devinit qec_ether_init(struct platform_device *op)
 
 	dev_set_drvdata(&op->dev, qe);
 
-	printk(KERN_INFO "%s: qe channel[%d] ", dev->name, qe->channel);
-	for (i = 0; i < 6; i++)
-		printk ("%2.2x%c",
-			dev->dev_addr[i],
-			i == 5 ? ' ': ':');
-	printk("\n");
-
-
+	printk(KERN_INFO "%s: qe channel[%d] %pM\n", dev->name, qe->channel,
+	       dev->dev_addr);
 	return 0;
 
 fail:
@@ -936,12 +930,12 @@ fail:
 	return res;
 }
 
-static int __devinit qec_sbus_probe(struct platform_device *op)
+static int qec_sbus_probe(struct platform_device *op)
 {
 	return qec_ether_init(op);
 }
 
-static int __devexit qec_sbus_remove(struct platform_device *op)
+static int qec_sbus_remove(struct platform_device *op)
 {
 	struct sunqe *qp = dev_get_drvdata(&op->dev);
 	struct net_device *net_dev = qp->dev;
@@ -978,7 +972,7 @@ static struct platform_driver qec_sbus_driver = {
 		.of_match_table = qec_sbus_match,
 	},
 	.probe		= qec_sbus_probe,
-	.remove		= __devexit_p(qec_sbus_remove),
+	.remove		= qec_sbus_remove,
 };
 
 static int __init qec_init(void)

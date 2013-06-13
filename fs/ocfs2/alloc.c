@@ -1134,7 +1134,7 @@ static int ocfs2_adjust_rightmost_branch(handle_t *handle,
 	}
 
 	el = path_leaf_el(path);
-	rec = &el->l_recs[le32_to_cpu(el->l_next_free_rec) - 1];
+	rec = &el->l_recs[le16_to_cpu(el->l_next_free_rec) - 1];
 
 	ocfs2_adjust_rightmost_records(handle, et, path, rec);
 
@@ -6751,8 +6751,7 @@ int ocfs2_zero_range_for_truncate(struct inode *inode, handle_t *handle,
 		mlog_errno(ret);
 
 out:
-	if (pages)
-		kfree(pages);
+	kfree(pages);
 
 	return ret;
 }

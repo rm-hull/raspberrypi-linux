@@ -12,13 +12,11 @@
 #include <asm/current.h>
 #include <asm/processor.h>
 #include <asm/cputable.h>
-#include <asm/firmware.h>
 #include <asm/hvcall.h>
 #include <asm/prom.h>
 #include <asm/machdep.h>
 #include <asm/smp.h>
 #include <asm/pmc.h>
-#include <asm/system.h>
 
 #include "cacheinfo.h"
 
@@ -52,7 +50,7 @@ static ssize_t store_smt_snooze_delay(struct device *dev,
 		return -EINVAL;
 
 	per_cpu(smt_snooze_delay, cpu->dev.id) = snooze;
-	update_smt_snooze_delay(snooze);
+	update_smt_snooze_delay(cpu->dev.id, snooze);
 
 	return count;
 }
@@ -196,6 +194,14 @@ static ssize_t show_dscr_default(struct device *dev,
 	return sprintf(buf, "%lx\n", dscr_default);
 }
 
+static void update_dscr(void *dummy)
+{
+	if (!current->thread.dscr_inherit) {
+		current->thread.dscr = dscr_default;
+		mtspr(SPRN_DSCR, dscr_default);
+	}
+}
+
 static ssize_t __used store_dscr_default(struct device *dev,
 		struct device_attribute *attr, const char *buf,
 		size_t count)
@@ -207,6 +213,8 @@ static ssize_t __used store_dscr_default(struct device *dev,
 	if (ret != 1)
 		return -EINVAL;
 	dscr_default = val;
+
+	on_each_cpu(update_dscr, NULL, 1);
 
 	return count;
 }
@@ -341,8 +349,7 @@ static void __cpuinit register_cpu_online(unsigned int cpu)
 	int i, nattrs;
 
 #ifdef CONFIG_PPC64
-	if (!firmware_has_feature(FW_FEATURE_ISERIES) &&
-			cpu_has_feature(CPU_FTR_SMT))
+	if (cpu_has_feature(CPU_FTR_SMT))
 		device_create_file(s, &dev_attr_smt_snooze_delay);
 #endif
 
@@ -414,8 +421,7 @@ static void unregister_cpu_online(unsigned int cpu)
 	BUG_ON(!c->hotpluggable);
 
 #ifdef CONFIG_PPC64
-	if (!firmware_has_feature(FW_FEATURE_ISERIES) &&
-			cpu_has_feature(CPU_FTR_SMT))
+	if (cpu_has_feature(CPU_FTR_SMT))
 		device_remove_file(s, &dev_attr_smt_snooze_delay);
 #endif
 
@@ -601,7 +607,7 @@ static void register_nodes(void)
 
 int sysfs_add_device_to_node(struct device *dev, int nid)
 {
-	struct node *node = &node_devices[nid];
+	struct node *node = node_devices[nid];
 	return sysfs_create_link(&node->dev.kobj, &dev->kobj,
 			kobject_name(&dev->kobj));
 }
@@ -609,7 +615,7 @@ EXPORT_SYMBOL_GPL(sysfs_add_device_to_node);
 
 void sysfs_remove_device_from_node(struct device *dev, int nid)
 {
-	struct node *node = &node_devices[nid];
+	struct node *node = node_devices[nid];
 	sysfs_remove_link(&node->dev.kobj, kobject_name(&dev->kobj));
 }
 EXPORT_SYMBOL_GPL(sysfs_remove_device_from_node);

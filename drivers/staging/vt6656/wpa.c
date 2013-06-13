@@ -83,9 +83,9 @@ WPA_ClearRSN(
     pBSSList->wAuthCount = 0;
     pBSSList->byDefaultK_as_PK = 0;
     pBSSList->byReplayIdx = 0;
-    pBSSList->sRSNCapObj.bRSNCapExist = FALSE;
+    pBSSList->sRSNCapObj.bRSNCapExist = false;
     pBSSList->sRSNCapObj.wRSNCap = 0;
-    pBSSList->bWPAValid = FALSE;
+    pBSSList->bWPAValid = false;
 }
 
 
@@ -149,7 +149,7 @@ WPA_ParseRSN(
             j = 0;
             DBG_PRT(MSG_LEVEL_DEBUG, KERN_INFO"wPKCount: %d, sizeof(pBSSList->abyPKType): %zu\n", pRSN->wPKCount, sizeof(pBSSList->abyPKType));
 	    for (i = 0; (i < pRSN->wPKCount) &&
-		   (j < sizeof(pBSSList->abyPKType)/sizeof(BYTE)); i++) {
+		   (j < ARRAY_SIZE(pBSSList->abyPKType)); i++) {
                 if(pRSN->len >= 12+i*4+4) { //oui1(4)+ver(2)+GKS(4)+PKSCnt(2)+PKS(4*i)
                     if ( !memcmp(pRSN->PKSList[i].abyOUI, abyOUI00, 4))
                         pBSSList->abyPKType[j++] = WPA_NONE;
@@ -182,7 +182,7 @@ WPA_ParseRSN(
             DBG_PRT(MSG_LEVEL_DEBUG, KERN_INFO"wAuthCount: %d, sizeof(pBSSList->abyAuthType): %zu\n",
                           pIE_RSN_Auth->wAuthCount, sizeof(pBSSList->abyAuthType));
 	    for (i = 0; (i < pIE_RSN_Auth->wAuthCount) &&
-		   (j < sizeof(pBSSList->abyAuthType)/sizeof(BYTE)); i++) {
+		   (j < ARRAY_SIZE(pBSSList->abyAuthType)); i++) {
                 if(pRSN->len >= 14+4+(m+i)*4) { //oui1(4)+ver(2)+GKS(4)+PKSCnt(2)+PKS(4*m)+AKC(2)+AKS(4*i)
                     if ( !memcmp(pIE_RSN_Auth->AuthKSList[i].abyOUI, abyOUI01, 4))
                         pBSSList->abyAuthType[j++] = WPA_AUTH_IEEE802_1X;
@@ -212,14 +212,14 @@ WPA_ParseRSN(
                 pbyCaps = (PBYTE)pIE_RSN_Auth->AuthKSList[n].abyOUI;
                 pBSSList->byDefaultK_as_PK = (*pbyCaps) & WPA_GROUPFLAG;
                 pBSSList->byReplayIdx = 2 << ((*pbyCaps >> WPA_REPLAYBITSSHIFT) & WPA_REPLAYBITS);
-                pBSSList->sRSNCapObj.bRSNCapExist = TRUE;
+                pBSSList->sRSNCapObj.bRSNCapExist = true;
                 pBSSList->sRSNCapObj.wRSNCap = *(PWORD)pbyCaps;
                 //DBG_PRN_GRP14(("pbyCaps: %X\n", *pbyCaps));
                 //DBG_PRN_GRP14(("byDefaultK_as_PK: %X\n", pBSSList->byDefaultK_as_PK));
                 //DBG_PRN_GRP14(("byReplayIdx: %X\n", pBSSList->byReplayIdx));
             }
         }
-        pBSSList->bWPAValid = TRUE;
+        pBSSList->bWPAValid = true;
     }
 }
 
@@ -231,7 +231,7 @@ WPA_ParseRSN(
  * Parameters:
  *  In:
  *      byCmd    - Search type
- *      byEncrypt- Encrcypt Type
+ *      byEncrypt- Encrypt Type
  *      pBSSList - BSS list
  *  Out:
  *      none
@@ -239,7 +239,7 @@ WPA_ParseRSN(
  * Return Value: none.
  *
 -*/
-BOOL
+bool
 WPA_SearchRSN(
     BYTE                byCmd,
     BYTE                byEncrypt,
@@ -249,14 +249,14 @@ WPA_SearchRSN(
     int ii;
     BYTE byPKType = WPA_NONE;
 
-    if (pBSSList->bWPAValid == FALSE)
-        return FALSE;
+    if (pBSSList->bWPAValid == false)
+        return false;
 
     switch(byCmd) {
     case 0:
 
         if (byEncrypt != pBSSList->byGKType)
-            return FALSE;
+            return false;
 
         if (pBSSList->wPKCount > 0) {
             for (ii = 0; ii < pBSSList->wPKCount; ii ++) {
@@ -270,9 +270,9 @@ WPA_SearchRSN(
                      byPKType = WPA_WEP104;
             }
             if (byEncrypt != byPKType)
-                return FALSE;
+                return false;
         }
-        return TRUE;
+        return true;
 //        if (pBSSList->wAuthCount > 0)
 //            for (ii=0; ii < pBSSList->wAuthCount; ii ++)
 //                if (byAuth == pBSSList->abyAuthType[ii])
@@ -282,7 +282,7 @@ WPA_SearchRSN(
     default:
         break;
     }
-    return FALSE;
+    return false;
 }
 
 /*+
@@ -299,20 +299,20 @@ WPA_SearchRSN(
  * Return Value: none.
  *
 -*/
-BOOL
+bool
 WPAb_Is_RSN(
      PWLAN_IE_RSN_EXT pRSN
     )
 {
     if (pRSN == NULL)
-        return FALSE;
+        return false;
 
     if ((pRSN->len >= 6) && // oui1(4)+ver(2)
         (pRSN->byElementID == WLAN_EID_RSN_WPA) &&  !memcmp(pRSN->abyOUI, abyOUI01, 4) &&
         (pRSN->wVersion == 1)) {
-        return TRUE;
+        return true;
     }
     else
-        return FALSE;
+        return false;
 }
 

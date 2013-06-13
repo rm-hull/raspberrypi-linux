@@ -167,16 +167,16 @@ unicode_oslm_strings(char **pbcc_area, const struct nls_table *nls_cp)
 	int bytes_ret = 0;
 
 	/* Copy OS version */
-	bytes_ret = cifs_strtoUCS((__le16 *)bcc_ptr, "Linux version ", 32,
-				  nls_cp);
+	bytes_ret = cifs_strtoUTF16((__le16 *)bcc_ptr, "Linux version ", 32,
+				    nls_cp);
 	bcc_ptr += 2 * bytes_ret;
-	bytes_ret = cifs_strtoUCS((__le16 *) bcc_ptr, init_utsname()->release,
-				  32, nls_cp);
+	bytes_ret = cifs_strtoUTF16((__le16 *) bcc_ptr, init_utsname()->release,
+				    32, nls_cp);
 	bcc_ptr += 2 * bytes_ret;
 	bcc_ptr += 2; /* trailing null */
 
-	bytes_ret = cifs_strtoUCS((__le16 *) bcc_ptr, CIFS_NETWORK_OPSYS,
-				  32, nls_cp);
+	bytes_ret = cifs_strtoUTF16((__le16 *) bcc_ptr, CIFS_NETWORK_OPSYS,
+				    32, nls_cp);
 	bcc_ptr += 2 * bytes_ret;
 	bcc_ptr += 2; /* trailing null */
 
@@ -197,8 +197,8 @@ static void unicode_domain_string(char **pbcc_area, struct cifs_ses *ses,
 		*(bcc_ptr+1) = 0;
 		bytes_ret = 0;
 	} else
-		bytes_ret = cifs_strtoUCS((__le16 *) bcc_ptr, ses->domainName,
-					  256, nls_cp);
+		bytes_ret = cifs_strtoUTF16((__le16 *) bcc_ptr, ses->domainName,
+					    256, nls_cp);
 	bcc_ptr += 2 * bytes_ret;
 	bcc_ptr += 2;  /* account for null terminator */
 
@@ -226,8 +226,8 @@ static void unicode_ssetup_strings(char **pbcc_area, struct cifs_ses *ses,
 		*bcc_ptr = 0;
 		*(bcc_ptr+1) = 0;
 	} else {
-		bytes_ret = cifs_strtoUCS((__le16 *) bcc_ptr, ses->user_name,
-					  MAX_USERNAME_SIZE, nls_cp);
+		bytes_ret = cifs_strtoUTF16((__le16 *) bcc_ptr, ses->user_name,
+					    MAX_USERNAME_SIZE, nls_cp);
 	}
 	bcc_ptr += 2 * bytes_ret;
 	bcc_ptr += 2; /* account for null termination */
@@ -246,16 +246,15 @@ static void ascii_ssetup_strings(char **pbcc_area, struct cifs_ses *ses,
 	/* copy user */
 	/* BB what about null user mounts - check that we do this BB */
 	/* copy user */
-	if (ses->user_name != NULL)
+	if (ses->user_name != NULL) {
 		strncpy(bcc_ptr, ses->user_name, MAX_USERNAME_SIZE);
+		bcc_ptr += strnlen(ses->user_name, MAX_USERNAME_SIZE);
+	}
 	/* else null user mount */
-
-	bcc_ptr += strnlen(ses->user_name, MAX_USERNAME_SIZE);
 	*bcc_ptr = 0;
 	bcc_ptr++; /* account for null termination */
 
 	/* copy domain */
-
 	if (ses->domainName != NULL) {
 		strncpy(bcc_ptr, ses->domainName, 256);
 		bcc_ptr += strnlen(ses->domainName, 256);
@@ -287,7 +286,7 @@ decode_unicode_ssetup(char **pbcc_area, int bleft, struct cifs_ses *ses,
 	cFYI(1, "bleft %d", bleft);
 
 	kfree(ses->serverOS);
-	ses->serverOS = cifs_strndup_from_ucs(data, bleft, true, nls_cp);
+	ses->serverOS = cifs_strndup_from_utf16(data, bleft, true, nls_cp);
 	cFYI(1, "serverOS=%s", ses->serverOS);
 	len = (UniStrnlen((wchar_t *) data, bleft / 2) * 2) + 2;
 	data += len;
@@ -296,7 +295,7 @@ decode_unicode_ssetup(char **pbcc_area, int bleft, struct cifs_ses *ses,
 		return;
 
 	kfree(ses->serverNOS);
-	ses->serverNOS = cifs_strndup_from_ucs(data, bleft, true, nls_cp);
+	ses->serverNOS = cifs_strndup_from_utf16(data, bleft, true, nls_cp);
 	cFYI(1, "serverNOS=%s", ses->serverNOS);
 	len = (UniStrnlen((wchar_t *) data, bleft / 2) * 2) + 2;
 	data += len;
@@ -305,7 +304,7 @@ decode_unicode_ssetup(char **pbcc_area, int bleft, struct cifs_ses *ses,
 		return;
 
 	kfree(ses->serverDomain);
-	ses->serverDomain = cifs_strndup_from_ucs(data, bleft, true, nls_cp);
+	ses->serverDomain = cifs_strndup_from_utf16(data, bleft, true, nls_cp);
 	cFYI(1, "serverDomain=%s", ses->serverDomain);
 
 	return;
@@ -365,7 +364,7 @@ static int decode_ascii_ssetup(char **pbcc_area, __u16 bleft,
 	return rc;
 }
 
-static int decode_ntlmssp_challenge(char *bcc_ptr, int blob_len,
+int decode_ntlmssp_challenge(char *bcc_ptr, int blob_len,
 				    struct cifs_ses *ses)
 {
 	unsigned int tioffset; /* challenge message target info area */
@@ -395,6 +394,10 @@ static int decode_ntlmssp_challenge(char *bcc_ptr, int blob_len,
 	ses->ntlmssp->server_flags = le32_to_cpu(pblob->NegotiateFlags);
 	tioffset = le32_to_cpu(pblob->TargetInfoArray.BufferOffset);
 	tilen = le16_to_cpu(pblob->TargetInfoArray.Length);
+	if (tioffset > blob_len || tioffset + tilen > blob_len) {
+		cERROR(1, "tioffset + tilen too high %u + %u", tioffset, tilen);
+		return -EINVAL;
+	}
 	if (tilen) {
 		ses->auth_key.response = kmalloc(tilen, GFP_KERNEL);
 		if (!ses->auth_key.response) {
@@ -412,7 +415,7 @@ static int decode_ntlmssp_challenge(char *bcc_ptr, int blob_len,
 
 /* We do not malloc the blob, it is passed in pbuffer, because
    it is fixed size, and small, making this approach cleaner */
-static void build_ntlmssp_negotiate_blob(unsigned char *pbuffer,
+void build_ntlmssp_negotiate_blob(unsigned char *pbuffer,
 					 struct cifs_ses *ses)
 {
 	NEGOTIATE_MESSAGE *sec_blob = (NEGOTIATE_MESSAGE *)pbuffer;
@@ -448,7 +451,7 @@ static void build_ntlmssp_negotiate_blob(unsigned char *pbuffer,
 /* We do not malloc the blob, it is passed in pbuffer, because its
    maximum possible size is fixed and small, making this approach cleaner.
    This function returns the length of the data in the blob */
-static int build_ntlmssp_auth_blob(unsigned char *pbuffer,
+int build_ntlmssp_auth_blob(unsigned char *pbuffer,
 					u16 *buflen,
 				   struct cifs_ses *ses,
 				   const struct nls_table *nls_cp)
@@ -502,8 +505,8 @@ static int build_ntlmssp_auth_blob(unsigned char *pbuffer,
 		tmp += 2;
 	} else {
 		int len;
-		len = cifs_strtoUCS((__le16 *)tmp, ses->domainName,
-				    MAX_USERNAME_SIZE, nls_cp);
+		len = cifs_strtoUTF16((__le16 *)tmp, ses->domainName,
+				      MAX_USERNAME_SIZE, nls_cp);
 		len *= 2; /* unicode is 2 bytes each */
 		sec_blob->DomainName.BufferOffset = cpu_to_le32(tmp - pbuffer);
 		sec_blob->DomainName.Length = cpu_to_le16(len);
@@ -518,8 +521,8 @@ static int build_ntlmssp_auth_blob(unsigned char *pbuffer,
 		tmp += 2;
 	} else {
 		int len;
-		len = cifs_strtoUCS((__le16 *)tmp, ses->user_name,
-				    MAX_USERNAME_SIZE, nls_cp);
+		len = cifs_strtoUTF16((__le16 *)tmp, ses->user_name,
+				      MAX_USERNAME_SIZE, nls_cp);
 		len *= 2; /* unicode is 2 bytes each */
 		sec_blob->UserName.BufferOffset = cpu_to_le32(tmp - pbuffer);
 		sec_blob->UserName.Length = cpu_to_le16(len);
@@ -553,7 +556,7 @@ setup_ntlmv2_ret:
 }
 
 int
-CIFS_SessSetup(unsigned int xid, struct cifs_ses *ses,
+CIFS_SessSetup(const unsigned int xid, struct cifs_ses *ses,
 	       const struct nls_table *nls_cp)
 {
 	int rc = 0;
@@ -873,7 +876,8 @@ ssetup_ntlmssp_authenticate:
 	pSMB = (SESSION_SETUP_ANDX *)iov[0].iov_base;
 	smb_buf = (struct smb_hdr *)iov[0].iov_base;
 
-	if ((type == RawNTLMSSP) && (smb_buf->Status.CifsError ==
+	if ((type == RawNTLMSSP) && (resp_buf_type != CIFS_NO_BUFFER) &&
+	    (smb_buf->Status.CifsError ==
 			cpu_to_le32(NT_STATUS_MORE_PROCESSING_REQUIRED))) {
 		if (phase != NtLmNegotiate) {
 			cERROR(1, "Unexpected more processing error");
@@ -895,7 +899,7 @@ ssetup_ntlmssp_authenticate:
 	if (action & GUEST_LOGIN)
 		cFYI(1, "Guest login"); /* BB mark SesInfo struct? */
 	ses->Suid = smb_buf->Uid;   /* UID left in wire format (le) */
-	cFYI(1, "UID = %d ", ses->Suid);
+	cFYI(1, "UID = %llu ", ses->Suid);
 	/* response can have either 3 or 4 word count - Samba sends 3 */
 	/* and lanman response is 3 */
 	bytes_remaining = get_bcc(smb_buf);
@@ -935,7 +939,7 @@ ssetup_ntlmssp_authenticate:
 
 ssetup_exit:
 	if (spnego_key) {
-		key_revoke(spnego_key);
+		key_invalidate(spnego_key);
 		key_put(spnego_key);
 	}
 	kfree(str_area);

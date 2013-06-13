@@ -399,14 +399,17 @@ static int __exit mc13xxx_rtc_remove(struct platform_device *pdev)
 	return 0;
 }
 
-const struct platform_device_id mc13xxx_rtc_idtable[] = {
+static const struct platform_device_id mc13xxx_rtc_idtable[] = {
 	{
 		.name = "mc13783-rtc",
 	}, {
 		.name = "mc13892-rtc",
+	}, {
+		.name = "mc34708-rtc",
 	},
-	{ }
+	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(platform, mc13xxx_rtc_idtable);
 
 static struct platform_driver mc13xxx_rtc_driver = {
 	.id_table = mc13xxx_rtc_idtable,
@@ -432,4 +435,3 @@ module_exit(mc13xxx_rtc_exit);
 MODULE_AUTHOR("Sascha Hauer <s.hauer@pengutronix.de>");
 MODULE_DESCRIPTION("RTC driver for Freescale MC13XXX PMIC");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:" DRIVER_NAME);

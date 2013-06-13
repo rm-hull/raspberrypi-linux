@@ -650,7 +650,6 @@ struct fusb300_ep {
 
 	unsigned char		epnum;
 	unsigned char		type;
-	const struct usb_endpoint_descriptor	*desc;
 };
 
 struct fusb300 {
@@ -673,5 +672,7 @@ struct fusb300 {
 	u32			addrofs;	/* next fifo address offset */
 	u8			reenum;		/* if re-enumeration */
 };
+
+#define to_fusb300(g)		(container_of((g), struct fusb300, gadget))
 
 #endif

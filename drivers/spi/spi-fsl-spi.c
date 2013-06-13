@@ -139,9 +139,11 @@ static void fsl_spi_change_mode(struct spi_device *spi)
 static void fsl_spi_chipselect(struct spi_device *spi, int value)
 {
 	struct mpc8xxx_spi *mpc8xxx_spi = spi_master_get_devdata(spi->master);
-	struct fsl_spi_platform_data *pdata = spi->dev.parent->platform_data;
+	struct fsl_spi_platform_data *pdata;
 	bool pol = spi->mode & SPI_CS_HIGH;
 	struct spi_mpc8xxx_cs	*cs = spi->controller_state;
+
+	pdata = spi->dev.parent->parent->platform_data;
 
 	if (value == BITBANG_CS_INACTIVE) {
 		if (pdata->cs_control)
@@ -841,7 +843,7 @@ static void fsl_spi_remove(struct mpc8xxx_spi *mspi)
 	fsl_spi_cpm_free(mspi);
 }
 
-static struct spi_master * __devinit fsl_spi_probe(struct device *dev,
+static struct spi_master * fsl_spi_probe(struct device *dev,
 		struct resource *mem, unsigned int irq)
 {
 	struct fsl_spi_platform_data *pdata = dev->platform_data;
@@ -931,7 +933,7 @@ err:
 
 static void fsl_spi_cs_control(struct spi_device *spi, bool on)
 {
-	struct device *dev = spi->dev.parent;
+	struct device *dev = spi->dev.parent->parent;
 	struct mpc8xxx_spi_probe_info *pinfo = to_of_pinfo(dev->platform_data);
 	u16 cs = spi->chip_select;
 	int gpio = pinfo->gpios[cs];
@@ -945,12 +947,12 @@ static int of_fsl_spi_get_chipselects(struct device *dev)
 	struct device_node *np = dev->of_node;
 	struct fsl_spi_platform_data *pdata = dev->platform_data;
 	struct mpc8xxx_spi_probe_info *pinfo = to_of_pinfo(pdata);
-	unsigned int ngpios;
+	int ngpios;
 	int i = 0;
 	int ret;
 
 	ngpios = of_gpio_count(np);
-	if (!ngpios) {
+	if (ngpios <= 0) {
 		/*
 		 * SPI w/o chip-select line. One SPI device is still permitted
 		 * though.
@@ -1039,7 +1041,7 @@ static int of_fsl_spi_free_chipselects(struct device *dev)
 	return 0;
 }
 
-static int __devinit of_fsl_spi_probe(struct platform_device *ofdev)
+static int of_fsl_spi_probe(struct platform_device *ofdev)
 {
 	struct device *dev = &ofdev->dev;
 	struct device_node *np = ofdev->dev.of_node;
@@ -1079,7 +1081,7 @@ err:
 	return ret;
 }
 
-static int __devexit of_fsl_spi_remove(struct platform_device *ofdev)
+static int of_fsl_spi_remove(struct platform_device *ofdev)
 {
 	int ret;
 
@@ -1103,7 +1105,7 @@ static struct platform_driver of_fsl_spi_driver = {
 		.of_match_table = of_fsl_spi_match,
 	},
 	.probe		= of_fsl_spi_probe,
-	.remove		= __devexit_p(of_fsl_spi_remove),
+	.remove		= of_fsl_spi_remove,
 };
 
 #ifdef CONFIG_MPC832x_RDB
@@ -1114,7 +1116,7 @@ static struct platform_driver of_fsl_spi_driver = {
  * tree can work with OpenFirmware driver. But for now we support old trees
  * as well.
  */
-static int __devinit plat_mpc8xxx_spi_probe(struct platform_device *pdev)
+static int plat_mpc8xxx_spi_probe(struct platform_device *pdev)
 {
 	struct resource *mem;
 	int irq;
@@ -1137,7 +1139,7 @@ static int __devinit plat_mpc8xxx_spi_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int __devexit plat_mpc8xxx_spi_remove(struct platform_device *pdev)
+static int plat_mpc8xxx_spi_remove(struct platform_device *pdev)
 {
 	return mpc8xxx_spi_remove(&pdev->dev);
 }
@@ -1145,7 +1147,7 @@ static int __devexit plat_mpc8xxx_spi_remove(struct platform_device *pdev)
 MODULE_ALIAS("platform:mpc8xxx_spi");
 static struct platform_driver mpc8xxx_spi_driver = {
 	.probe = plat_mpc8xxx_spi_probe,
-	.remove = __devexit_p(plat_mpc8xxx_spi_remove),
+	.remove = plat_mpc8xxx_spi_remove,
 	.driver = {
 		.name = "mpc8xxx_spi",
 		.owner = THIS_MODULE,

@@ -34,7 +34,6 @@
 #include <linux/i2c.h>
 #include <linux/mutex.h>
 #include <linux/uaccess.h>
-#include <asm/system.h>
 
 #include "go7007.h"
 #include "go7007-priv.h"
@@ -77,7 +76,6 @@ static void abort_queued(struct go7007 *go)
 
 static int go7007_streamoff(struct go7007 *go)
 {
-	int retval = -EINVAL;
 	unsigned long flags;
 
 	mutex_lock(&go->hw_lock);
@@ -88,7 +86,6 @@ static int go7007_streamoff(struct go7007 *go)
 		abort_queued(go);
 		spin_unlock_irqrestore(&go->spinlock, flags);
 		go7007_reset_encoder(go);
-		retval = 0;
 	}
 	mutex_unlock(&go->hw_lock);
 	return 0;
@@ -101,7 +98,7 @@ static int go7007_open(struct file *file)
 
 	if (go->status != STATUS_ONLINE)
 		return -EBUSY;
-	gofh = kmalloc(sizeof(struct go7007_file), GFP_KERNEL);
+	gofh = kzalloc(sizeof(struct go7007_file), GFP_KERNEL);
 	if (gofh == NULL)
 		return -ENOMEM;
 	++go->ref_count;
@@ -815,7 +812,7 @@ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 		return retval;
 
 	mutex_lock(&gofh->lock);
-	if (buf->index < 0 || buf->index >= gofh->buf_count)
+	if (buf->index >= gofh->buf_count)
 		goto unlock_and_return;
 
 	gobuf = &gofh->bufs[buf->index];
@@ -956,6 +953,7 @@ static int vidioc_streamon(struct file *file, void *priv,
 	}
 	mutex_unlock(&go->hw_lock);
 	mutex_unlock(&gofh->lock);
+	call_all(&go->v4l2_dev, video, s_stream, 1);
 
 	return retval;
 }
@@ -971,6 +969,7 @@ static int vidioc_streamoff(struct file *file, void *priv,
 	mutex_lock(&gofh->lock);
 	go7007_streamoff(go);
 	mutex_unlock(&gofh->lock);
+	call_all(&go->v4l2_dev, video, s_stream, 0);
 
 	return 0;
 }
@@ -1050,15 +1049,15 @@ static int vidioc_s_parm(struct file *filp, void *priv,
 	return 0;
 }
 
-/* VIDIOC_ENUMSTD on go7007 were used for enumberating the supported fps and
+/* VIDIOC_ENUMSTD on go7007 were used for enumerating the supported fps and
    its resolution, when the device is not connected to TV.
-   This were an API abuse, probably used by the lack of specific IOCTL's to
-   enumberate it, by the time the driver were written.
+   This is were an API abuse, probably used by the lack of specific IOCTL's to
+   enumerate it, by the time the driver was written.
 
    However, since kernel 2.6.19, two new ioctls (VIDIOC_ENUM_FRAMEINTERVALS
    and VIDIOC_ENUM_FRAMESIZES) were added for this purpose.
 
-   The two functions bellow implements the newer ioctls
+   The two functions below implement the newer ioctls
 */
 static int vidioc_enum_framesizes(struct file *filp, void *priv,
 				  struct v4l2_frmsizeenum *fsize)
@@ -1375,7 +1374,7 @@ static int vidioc_g_crop(struct file *file, void *priv, struct v4l2_crop *crop)
 
 /* FIXME: vidioc_s_crop is not really implemented!!!
  */
-static int vidioc_s_crop(struct file *file, void *priv, struct v4l2_crop *crop)
+static int vidioc_s_crop(struct file *file, void *priv, const struct v4l2_crop *crop)
 {
 	if (crop->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
@@ -1395,7 +1394,7 @@ static int vidioc_g_jpegcomp(struct file *file, void *priv,
 }
 
 static int vidioc_s_jpegcomp(struct file *file, void *priv,
-			 struct v4l2_jpegcompression *params)
+			 const struct v4l2_jpegcompression *params)
 {
 	if (params->quality != 50 ||
 			params->jpeg_markers != (V4L2_JPEG_MARKER_DHT |
@@ -1814,8 +1813,8 @@ int go7007_v4l2_init(struct go7007 *go)
 	}
 	video_set_drvdata(go->video_dev, go);
 	++go->ref_count;
-	printk(KERN_INFO "%s: registered device %s [v4l2]\n",
-	       go->video_dev->name, video_device_node_name(go->video_dev));
+	dev_info(go->dev, "registered device %s [v4l2]\n",
+		 video_device_node_name(go->video_dev));
 
 	return 0;
 }
@@ -1835,5 +1834,6 @@ void go7007_v4l2_remove(struct go7007 *go)
 	mutex_unlock(&go->hw_lock);
 	if (go->video_dev)
 		video_unregister_device(go->video_dev);
-	v4l2_device_unregister(&go->v4l2_dev);
+	if (go->status != STATUS_SHUTDOWN)
+		v4l2_device_unregister(&go->v4l2_dev);
 }

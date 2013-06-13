@@ -304,7 +304,8 @@ int carl9170_set_operating_mode(struct ar9170 *ar)
 	struct ath_common *common = &ar->common;
 	u8 *mac_addr, *bssid;
 	u32 cam_mode = AR9170_MAC_CAM_DEFAULTS;
-	u32 enc_mode = AR9170_MAC_ENCRYPTION_DEFAULTS;
+	u32 enc_mode = AR9170_MAC_ENCRYPTION_DEFAULTS |
+		AR9170_MAC_ENCRYPTION_MGMT_RX_SOFTWARE;
 	u32 rx_ctrl = AR9170_MAC_RX_CTRL_DEAGG |
 		      AR9170_MAC_RX_CTRL_SHORT_FILTER;
 	u32 sniffer = AR9170_MAC_SNIFFER_DEFAULTS;
@@ -318,10 +319,10 @@ int carl9170_set_operating_mode(struct ar9170 *ar)
 		bssid = common->curbssid;
 
 		switch (vif->type) {
-		case NL80211_IFTYPE_MESH_POINT:
 		case NL80211_IFTYPE_ADHOC:
 			cam_mode |= AR9170_MAC_CAM_IBSS;
 			break;
+		case NL80211_IFTYPE_MESH_POINT:
 		case NL80211_IFTYPE_AP:
 			cam_mode |= AR9170_MAC_CAM_AP;
 
@@ -342,7 +343,24 @@ int carl9170_set_operating_mode(struct ar9170 *ar)
 			break;
 		}
 	} else {
-		mac_addr = NULL;
+		/*
+		 * Enable monitor mode
+		 *
+		 * rx_ctrl |= AR9170_MAC_RX_CTRL_ACK_IN_SNIFFER;
+		 * sniffer |= AR9170_MAC_SNIFFER_ENABLE_PROMISC;
+		 *
+		 * When the hardware is in SNIFFER_PROMISC mode,
+		 * it generates spurious ACKs for every incoming
+		 * frame. This confuses every peer in the
+		 * vicinity and the network throughput will suffer
+		 * badly.
+		 *
+		 * Hence, the hardware will be put into station
+		 * mode and just the rx filters are disabled.
+		 */
+		cam_mode |= AR9170_MAC_CAM_STA;
+		rx_ctrl |= AR9170_MAC_RX_CTRL_PASS_TO_HOST;
+		mac_addr = common->macaddr;
 		bssid = NULL;
 	}
 	rcu_read_unlock();
@@ -354,8 +372,6 @@ int carl9170_set_operating_mode(struct ar9170 *ar)
 		enc_mode |= AR9170_MAC_ENCRYPTION_RX_SOFTWARE;
 
 	if (ar->sniffer_enabled) {
-		rx_ctrl |= AR9170_MAC_RX_CTRL_ACK_IN_SNIFFER;
-		sniffer |= AR9170_MAC_SNIFFER_ENABLE_PROMISC;
 		enc_mode |= AR9170_MAC_ENCRYPTION_RX_SOFTWARE;
 	}
 
@@ -484,4 +500,39 @@ int carl9170_disable_key(struct ar9170 *ar, const u8 id)
 
 	return carl9170_exec_cmd(ar, CARL9170_CMD_DKEY,
 		sizeof(key), (u8 *)&key, 0, NULL);
+}
+
+int carl9170_set_mac_tpc(struct ar9170 *ar, struct ieee80211_channel *channel)
+{
+	unsigned int power, chains;
+
+	if (ar->eeprom.tx_mask != 1)
+		chains = AR9170_TX_PHY_TXCHAIN_2;
+	else
+		chains = AR9170_TX_PHY_TXCHAIN_1;
+
+	switch (channel->band) {
+	case IEEE80211_BAND_2GHZ:
+		power = ar->power_2G_ofdm[0] & 0x3f;
+		break;
+	case IEEE80211_BAND_5GHZ:
+		power = ar->power_5G_leg[0] & 0x3f;
+		break;
+	default:
+		BUG_ON(1);
+	}
+
+	power = min_t(unsigned int, power, ar->hw->conf.power_level * 2);
+
+	carl9170_regwrite_begin(ar);
+	carl9170_regwrite(AR9170_MAC_REG_ACK_TPC,
+			  0x3c1e | power << 20 | chains << 26);
+	carl9170_regwrite(AR9170_MAC_REG_RTS_CTS_TPC,
+			  power << 5 | chains << 11 |
+			  power << 21 | chains << 27);
+	carl9170_regwrite(AR9170_MAC_REG_CFEND_QOSNULL_TPC,
+			  power << 5 | chains << 11 |
+			  power << 21 | chains << 27);
+	carl9170_regwrite_finish();
+	return carl9170_regwrite_result();
 }

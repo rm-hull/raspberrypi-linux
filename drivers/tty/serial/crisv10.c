@@ -34,9 +34,9 @@ static char *serial_version = "$Revision: 1.25 $";
 
 #include <asm/irq.h>
 #include <asm/dma.h>
-#include <asm/system.h>
 
 #include <arch/svinto.h>
+#include <arch/system.h>
 
 /* non-arch dependent serial structures are in linux/serial.h */
 #include <linux/serial.h>
@@ -952,23 +952,10 @@ static const struct control_pins e100_modem_pins[NR_PORTS] =
 /* Input */
 #define E100_DSR_GET(info) ((*e100_modem_pins[(info)->line].dsr_port) & e100_modem_pins[(info)->line].dsr_mask)
 
-
-/*
- * tmp_buf is used as a temporary buffer by serial_write.  We need to
- * lock it in case the memcpy_fromfs blocks while swapping in a page,
- * and some other program tries to do a serial write at the same time.
- * Since the lock will only come under contention when the system is
- * swapping and available memory is low, it makes sense to share one
- * buffer across all the serial ports, since it significantly saves
- * memory if large numbers of serial ports are open.
- */
-static unsigned char *tmp_buf;
-static DEFINE_MUTEX(tmp_buf_mutex);
-
 /* Calculate the chartime depending on baudrate, numbor of bits etc. */
 static void update_char_time(struct e100_serial * info)
 {
-	tcflag_t cflags = info->port.tty->termios->c_cflag;
+	tcflag_t cflags = info->port.tty->termios.c_cflag;
 	int bits;
 
 	/* calc. number of bits / data byte */
@@ -1486,7 +1473,7 @@ rs_stop(struct tty_struct *tty)
 		xoff = IO_FIELD(R_SERIAL0_XOFF, xoff_char,
 				STOP_CHAR(info->port.tty));
 		xoff |= IO_STATE(R_SERIAL0_XOFF, tx_stop, stop);
-		if (tty->termios->c_iflag & IXON ) {
+		if (tty->termios.c_iflag & IXON ) {
 			xoff |= IO_STATE(R_SERIAL0_XOFF, auto_xoff, enable);
 		}
 
@@ -1509,7 +1496,7 @@ rs_start(struct tty_struct *tty)
 					 info->xmit.tail,SERIAL_XMIT_SIZE)));
 		xoff = IO_FIELD(R_SERIAL0_XOFF, xoff_char, STOP_CHAR(tty));
 		xoff |= IO_STATE(R_SERIAL0_XOFF, tx_stop, enable);
-		if (tty->termios->c_iflag & IXON ) {
+		if (tty->termios.c_iflag & IXON ) {
 			xoff |= IO_STATE(R_SERIAL0_XOFF, auto_xoff, enable);
 		}
 
@@ -1773,8 +1760,7 @@ add_char_and_flag(struct e100_serial *info, unsigned char data, unsigned char fl
 
 		info->icount.rx++;
 	} else {
-		struct tty_struct *tty = info->port.tty;
-		tty_insert_flip_char(tty, data, flag);
+		tty_insert_flip_char(&info->port, data, flag);
 		info->icount.rx++;
 	}
 
@@ -2118,22 +2104,15 @@ static int force_eop_if_needed(struct e100_serial *info)
 
 static void flush_to_flip_buffer(struct e100_serial *info)
 {
-	struct tty_struct *tty;
 	struct etrax_recv_buffer *buffer;
 	unsigned long flags;
 
 	local_irq_save(flags);
-	tty = info->port.tty;
-
-	if (!tty) {
-		local_irq_restore(flags);
-		return;
-	}
 
 	while ((buffer = info->first_recv_buffer) != NULL) {
 		unsigned int count = buffer->length;
 
-		tty_insert_flip_string(tty, buffer->buffer, count);
+		tty_insert_flip_string(&info->port, buffer->buffer, count);
 		info->recv_cnt -= count;
 
 		if (count == buffer->length) {
@@ -2152,7 +2131,7 @@ static void flush_to_flip_buffer(struct e100_serial *info)
 	local_irq_restore(flags);
 
 	/* This includes a check for low-latency */
-	tty_flip_buffer_push(tty);
+	tty_flip_buffer_push(&info->port);
 }
 
 static void check_flush_timeout(struct e100_serial *info)
@@ -2288,12 +2267,6 @@ static
 struct e100_serial * handle_ser_rx_interrupt_no_dma(struct e100_serial *info)
 {
 	unsigned long data_read;
-	struct tty_struct *tty = info->port.tty;
-
-	if (!tty) {
-		printk("!NO TTY!\n");
-		return info;
-	}
 
 	/* Read data and status at the same time */
 	data_read = *((unsigned long *)&info->ioport[REG_DATA_STATUS32]);
@@ -2351,8 +2324,7 @@ more_data:
 					data_in, data_read);
 				char flag = TTY_NORMAL;
 				if (info->errorcode == ERRCODE_INSERT_BREAK) {
-					struct tty_struct *tty = info->port.tty;
-					tty_insert_flip_char(tty, 0, flag);
+					tty_insert_flip_char(&info->port, 0, flag);
 					info->icount.rx++;
 				}
 
@@ -2366,7 +2338,7 @@ more_data:
 					info->icount.frame++;
 					flag = TTY_FRAME;
 				}
-				tty_insert_flip_char(tty, data, flag);
+				tty_insert_flip_char(&info->port, data, flag);
 				info->errorcode = 0;
 			}
 			info->break_detected_cnt = 0;
@@ -2382,7 +2354,7 @@ more_data:
 			log_int(rdpc(), 0, 0);
 		}
 		);
-		tty_insert_flip_char(tty,
+		tty_insert_flip_char(&info->port,
 			IO_EXTRACT(R_SERIAL0_READ, data_in, data_read),
 			TTY_NORMAL);
 	} else {
@@ -2397,7 +2369,7 @@ more_data:
 		goto more_data;
 	}
 
-	tty_flip_buffer_push(info->port.tty);
+	tty_flip_buffer_push(&info->port);
 	return info;
 }
 
@@ -2942,7 +2914,7 @@ shutdown(struct e100_serial * info)
 			descr[i].buf = 0;
 		}
 
-	if (!info->port.tty || (info->port.tty->termios->c_cflag & HUPCL)) {
+	if (!info->port.tty || (info->port.tty->termios.c_cflag & HUPCL)) {
 		/* hang up DTR and RTS if HUPCL is enabled */
 		e100_dtr(info, 0);
 		e100_rts(info, 0); /* could check CRTSCTS before doing this */
@@ -2966,12 +2938,12 @@ change_speed(struct e100_serial *info)
 	unsigned long flags;
 	/* first some safety checks */
 
-	if (!info->port.tty || !info->port.tty->termios)
+	if (!info->port.tty)
 		return;
 	if (!info->ioport)
 		return;
 
-	cflag = info->port.tty->termios->c_cflag;
+	cflag = info->port.tty->termios.c_cflag;
 
 	/* possibly, the tx/rx should be disabled first to do this safely */
 
@@ -3101,7 +3073,7 @@ change_speed(struct e100_serial *info)
 	info->ioport[REG_REC_CTRL] = info->rx_ctrl;
 	xoff = IO_FIELD(R_SERIAL0_XOFF, xoff_char, STOP_CHAR(info->port.tty));
 	xoff |= IO_STATE(R_SERIAL0_XOFF, tx_stop, enable);
-	if (info->port.tty->termios->c_iflag & IXON ) {
+	if (info->port.tty->termios.c_iflag & IXON ) {
 		DFLOW(DEBUG_LOG(info->line, "FLOW XOFF enabled 0x%02X\n",
 				STOP_CHAR(info->port.tty)));
 		xoff |= IO_STATE(R_SERIAL0_XOFF, auto_xoff, enable);
@@ -3150,7 +3122,7 @@ static int rs_raw_write(struct tty_struct *tty,
 
 	/* first some sanity checks */
 
-	if (!tty || !info->xmit.buf || !tmp_buf)
+	if (!info->xmit.buf)
 		return 0;
 
 #ifdef SERIAL_DEBUG_DATA
@@ -3368,7 +3340,7 @@ rs_throttle(struct tty_struct * tty)
 	DFLOW(DEBUG_LOG(info->line,"rs_throttle %lu\n", tty->ldisc.chars_in_buffer(tty)));
 
 	/* Do RTS before XOFF since XOFF might take some time */
-	if (tty->termios->c_cflag & CRTSCTS) {
+	if (tty->termios.c_cflag & CRTSCTS) {
 		/* Turn off RTS line */
 		e100_rts(info, 0);
 	}
@@ -3390,7 +3362,7 @@ rs_unthrottle(struct tty_struct * tty)
 	DFLOW(DEBUG_LOG(info->line,"rs_unthrottle ldisc %d\n", tty->ldisc.chars_in_buffer(tty)));
 	DFLOW(DEBUG_LOG(info->line,"rs_unthrottle flip.count: %i\n", tty->flip.count));
 	/* Do RTS before XOFF since XOFF might take some time */
-	if (tty->termios->c_cflag & CRTSCTS) {
+	if (tty->termios.c_cflag & CRTSCTS) {
 		/* Assert RTS line  */
 		e100_rts(info, 1);
 	}
@@ -3477,7 +3449,7 @@ set_serial_info(struct e100_serial *info,
 	info->type = new_serial.type;
 	info->close_delay = new_serial.close_delay;
 	info->closing_wait = new_serial.closing_wait;
-	info->port.tty->low_latency = (info->flags & ASYNC_LOW_LATENCY) ? 1 : 0;
+	info->port.low_latency = (info->flags & ASYNC_LOW_LATENCY) ? 1 : 0;
 
  check_and_exit:
 	if (info->flags & ASYNC_INITIALIZED) {
@@ -3761,7 +3733,7 @@ rs_set_termios(struct tty_struct *tty, struct ktermios *old_termios)
 
 	/* Handle turning off CRTSCTS */
 	if ((old_termios->c_cflag & CRTSCTS) &&
-	    !(tty->termios->c_cflag & CRTSCTS)) {
+	    !(tty->termios.c_cflag & CRTSCTS)) {
 		tty->hw_stopped = 0;
 		rs_start(tty);
 	}
@@ -3828,7 +3800,7 @@ rs_close(struct tty_struct *tty, struct file * filp)
 	 * separate termios for callout and dialin.
 	 */
 	if (info->flags & ASYNC_NORMAL_ACTIVE)
-		info->normal_termios = *tty->termios;
+		info->normal_termios = tty->termios;
 	/*
 	 * Now we wait for the transmit buffer to clear; and we notify
 	 * the line discipline to only process XON/XOFF characters.
@@ -3989,7 +3961,7 @@ block_til_ready(struct tty_struct *tty, struct file * filp,
 	 */
 	if (tty_hung_up_p(filp) ||
 	    (info->flags & ASYNC_CLOSING)) {
-		wait_event_interruptible_tty(info->close_wait,
+		wait_event_interruptible_tty(tty, info->close_wait,
 			!(info->flags & ASYNC_CLOSING));
 #ifdef SERIAL_DO_RESTART
 		if (info->flags & ASYNC_HUP_NOTIFY)
@@ -4011,7 +3983,7 @@ block_til_ready(struct tty_struct *tty, struct file * filp,
 		return 0;
 	}
 
-	if (tty->termios->c_cflag & CLOCAL) {
+	if (tty->termios.c_cflag & CLOCAL) {
 			do_clocal = 1;
 	}
 
@@ -4065,9 +4037,9 @@ block_til_ready(struct tty_struct *tty, struct file * filp,
 		printk("block_til_ready blocking: ttyS%d, count = %d\n",
 		       info->line, info->count);
 #endif
-		tty_unlock();
+		tty_unlock(tty);
 		schedule();
-		tty_lock();
+		tty_lock(tty);
 	}
 	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&info->open_wait, &wait);
@@ -4105,20 +4077,10 @@ static int
 rs_open(struct tty_struct *tty, struct file * filp)
 {
 	struct e100_serial	*info;
-	int 			retval, line;
-	unsigned long           page;
+	int 			retval;
 	int                     allocated_resources = 0;
 
-	/* find which port we want to open */
-	line = tty->index;
-
-	if (line < 0 || line >= NR_PORTS)
-		return -ENODEV;
-
-	/* find the corresponding e100_serial struct in the table */
-	info = rs_table + line;
-
-	/* don't allow the opening of ports that are not enabled in the HW config */
+	info = rs_table + tty->index;
 	if (!info->enabled)
 		return -ENODEV;
 
@@ -4131,25 +4093,14 @@ rs_open(struct tty_struct *tty, struct file * filp)
 	tty->driver_data = info;
 	info->port.tty = tty;
 
-	info->port.tty->low_latency = (info->flags & ASYNC_LOW_LATENCY) ? 1 : 0;
-
-	if (!tmp_buf) {
-		page = get_zeroed_page(GFP_KERNEL);
-		if (!page) {
-			return -ENOMEM;
-		}
-		if (tmp_buf)
-			free_page(page);
-		else
-			tmp_buf = (unsigned char *) page;
-	}
+	info->port.low_latency = !!(info->flags & ASYNC_LOW_LATENCY);
 
 	/*
 	 * If the port is in the middle of closing, bail out now
 	 */
 	if (tty_hung_up_p(filp) ||
 	    (info->flags & ASYNC_CLOSING)) {
-		wait_event_interruptible_tty(info->close_wait,
+		wait_event_interruptible_tty(tty, info->close_wait,
 			!(info->flags & ASYNC_CLOSING));
 #ifdef SERIAL_DO_RESTART
 		return ((info->flags & ASYNC_HUP_NOTIFY) ?
@@ -4253,7 +4204,7 @@ rs_open(struct tty_struct *tty, struct file * filp)
 	}
 
 	if ((info->count == 1) && (info->flags & ASYNC_SPLIT_TERMIOS)) {
-		*tty->termios = info->normal_termios;
+		tty->termios = info->normal_termios;
 		change_speed(info);
 	}
 
@@ -4477,14 +4428,12 @@ static int __init rs_init(void)
 		B115200 | CS8 | CREAD | HUPCL | CLOCAL; /* is normally B9600 default... */
 	driver->init_termios.c_ispeed = 115200;
 	driver->init_termios.c_ospeed = 115200;
-	driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
+	driver->flags = TTY_DRIVER_REAL_RAW;
 
 	tty_set_operations(driver, &rs_ops);
         serial_driver = driver;
-	if (tty_register_driver(driver))
-		panic("Couldn't register serial driver\n");
-	/* do some initializing for the separate ports */
 
+	/* do some initializing for the separate ports */
 	for (i = 0, info = rs_table; i < NR_PORTS; i++,info++) {
 		if (info->enabled) {
 			if (cris_request_io_interface(info->io_if,
@@ -4496,6 +4445,7 @@ static int __init rs_init(void)
 				info->enabled = 0;
 			}
 		}
+		tty_port_init(&info->port);
 		info->uses_dma_in = 0;
 		info->uses_dma_out = 0;
 		info->line = i;
@@ -4535,7 +4485,12 @@ static int __init rs_init(void)
 			printk(KERN_INFO "%s%d at %p is a builtin UART with DMA\n",
 			       serial_driver->name, info->line, info->ioport);
 		}
+		tty_port_link_device(&info->port, driver, i);
 	}
+
+	if (tty_register_driver(driver))
+		panic("Couldn't register serial driver\n");
+
 #ifdef CONFIG_ETRAX_FAST_TIMER
 #ifdef CONFIG_ETRAX_SERIAL_FAST_TIMER
 	memset(fast_timers, 0, sizeof(fast_timers));

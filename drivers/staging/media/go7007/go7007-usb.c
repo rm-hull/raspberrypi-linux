@@ -1054,7 +1054,13 @@ static int go7007_usb_probe(struct usb_interface *intf,
 	else
 		go->hpi_ops = &go7007_usb_onboard_hpi_ops;
 	go->hpi_context = usb;
-	usb_fill_int_urb(usb->intr_urb, usb->usbdev,
+	if (go->board_id == GO7007_BOARDID_SENSORAY_2250)
+		usb_fill_bulk_urb(usb->intr_urb, usb->usbdev,
+			usb_rcvbulkpipe(usb->usbdev, 4),
+			usb->intr_urb->transfer_buffer, 2*sizeof(u16),
+			go7007_usb_readinterrupt_complete, go);
+	else
+		usb_fill_int_urb(usb->intr_urb, usb->usbdev,
 			usb_rcvintpipe(usb->usbdev, 4),
 			usb->intr_urb->transfer_buffer, 2*sizeof(u16),
 			go7007_usb_readinterrupt_complete, go, 8);
@@ -1104,9 +1110,6 @@ static int go7007_usb_probe(struct usb_interface *intf,
 			} else {
 				u16 channel;
 
-				/* set GPIO5 to be an output, currently low */
-				go7007_write_addr(go, 0x3c82, 0x0000);
-				go7007_write_addr(go, 0x3c80, 0x00df);
 				/* read channel number from GPIO[1:0] */
 				go7007_read_addr(go, 0x3c81, &channel);
 				channel &= 0x3;
@@ -1239,7 +1242,6 @@ static void go7007_usb_disconnect(struct usb_interface *intf)
 	struct urb *vurb, *aurb;
 	int i;
 
-	go->status = STATUS_SHUTDOWN;
 	usb_kill_urb(usb->intr_urb);
 
 	/* Free USB-related structs */
@@ -1263,6 +1265,7 @@ static void go7007_usb_disconnect(struct usb_interface *intf)
 	kfree(go->hpi_context);
 
 	go7007_remove(go);
+	go->status = STATUS_SHUTDOWN;
 }
 
 static struct usb_driver go7007_usb_driver = {
@@ -1273,3 +1276,4 @@ static struct usb_driver go7007_usb_driver = {
 };
 
 module_usb_driver(go7007_usb_driver);
+MODULE_LICENSE("GPL v2");

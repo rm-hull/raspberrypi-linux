@@ -187,13 +187,6 @@ Shadow pages contain the following information:
     perform a reverse map from a pte to a gfn. When role.direct is set, any
     element of this array can be calculated from the gfn field when used, in
     this case, the array of gfns is not allocated. See role.direct and gfn.
-  slot_bitmap:
-    A bitmap containing one bit per memory slot.  If the page contains a pte
-    mapping a page from memory slot n, then bit n of slot_bitmap will be set
-    (if a page is aliased among several slots, then it is not guaranteed that
-    all slots will be marked).
-    Used during dirty logging to avoid scanning a shadow page if none if its
-    pages need tracking.
   root_count:
     A counter keeping track of how many hardware registers (guest cr3 or
     pdptrs) are now pointing at the page.  While this counter is nonzero, the
@@ -347,7 +340,7 @@ To instantiate a large spte, four constraints must be satisfied:
 
 - the spte must point to a large host page
 - the guest pte must be a large pte of at least equivalent size (if tdp is
-  enabled, there is no guest pte and this condition is satisified)
+  enabled, there is no guest pte and this condition is satisfied)
 - if the spte will be writeable, the large page frame may not overlap any
   write-protected pages
 - the guest page must be wholly contained by a single memory slot
@@ -356,7 +349,7 @@ To check the last two conditions, the mmu maintains a ->write_count set of
 arrays for each memory slot and large page size.  Every write protected page
 causes its write_count to be incremented, thus preventing instantiation of
 a large spte.  The frames at the end of an unaligned memory slot have
-artificically inflated ->write_counts so they can never be instantiated.
+artificially inflated ->write_counts so they can never be instantiated.
 
 Further reading
 ===============

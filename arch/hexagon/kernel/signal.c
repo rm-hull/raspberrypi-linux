@@ -1,7 +1,7 @@
 /*
  * Signal support for Hexagon processor
  *
- * Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2010-2011, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -20,7 +20,6 @@
 
 #include <linux/linkage.h>
 #include <linux/syscalls.h>
-#include <linux/freezer.h>
 #include <linux/tracehook.h>
 #include <asm/registers.h>
 #include <asm/thread_info.h>
@@ -30,8 +29,6 @@
 #include <asm/cacheflush.h>
 #include <asm/signal.h>
 #include <asm/vdso.h>
-
-#define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
 struct rt_sigframe {
 	unsigned long tramp[2];
@@ -128,6 +125,7 @@ static int setup_rt_frame(int signr, struct k_sigaction *ka, siginfo_t *info,
 	err |= __put_user(0x5400c004, &frame->tramp[1]);
 	err |= setup_sigcontext(regs, &frame->uc.uc_mcontext);
 	err |= __copy_to_user(&frame->uc.uc_sigmask, set, sizeof(*set));
+	err |= __save_altstack(&frame->uc.uc_stack, user_stack_pointer(regs));
 	if (err)
 		goto sigsegv;
 
@@ -149,11 +147,9 @@ sigsegv:
 /*
  * Setup invocation of signal handler
  */
-static int handle_signal(int sig, siginfo_t *info, struct k_sigaction *ka,
-			 sigset_t *oldset, struct pt_regs *regs)
+static void handle_signal(int sig, siginfo_t *info, struct k_sigaction *ka,
+			 struct pt_regs *regs)
 {
-	int rc;
-
 	/*
 	 * If we're handling a signal that aborted a system call,
 	 * set up the error return value before adding the signal
@@ -186,20 +182,12 @@ static int handle_signal(int sig, siginfo_t *info, struct k_sigaction *ka,
 	 * Set up the stack frame; not doing the SA_SIGINFO thing.  We
 	 * only set up the rt_frame flavor.
 	 */
-	rc = setup_rt_frame(sig, ka, info, oldset, regs);
-
 	/* If there was an error on setup, no signal was delivered. */
-	if (rc)
-		return rc;
+	if (setup_rt_frame(sig, ka, info, sigmask_to_save(), regs) < 0)
+		return;
 
-	spin_lock_irq(&current->sighand->siglock);
-	sigorsets(&current->blocked, &current->blocked, &ka->sa.sa_mask);
-	if (!(ka->sa.sa_flags & SA_NODEFER))
-		sigaddset(&current->blocked, sig);
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
-
-	return 0;
+	signal_delivered(sig, info, ka, regs,
+			test_thread_flag(TIF_SINGLESTEP));
 }
 
 /*
@@ -214,34 +202,13 @@ static void do_signal(struct pt_regs *regs)
 	if (!user_mode(regs))
 		return;
 
-	if (try_to_freeze())
-		goto no_signal;
-
 	signo = get_signal_to_deliver(&info, &sigact, regs, NULL);
 
 	if (signo > 0) {
-		sigset_t *oldset;
-
-		if (test_thread_flag(TIF_RESTORE_SIGMASK))
-			oldset = &current->saved_sigmask;
-		else
-			oldset = &current->blocked;
-
-		if (handle_signal(signo, &info, &sigact, oldset, regs) == 0) {
-			/*
-			 * Successful delivery case.  The saved sigmask is
-			 * stored in the signal frame, and will be restored
-			 * by sigreturn.  We can clear the TIF flag.
-			 */
-			clear_thread_flag(TIF_RESTORE_SIGMASK);
-
-			tracehook_signal_handler(signo, &info, &sigact, regs,
-				test_thread_flag(TIF_SINGLESTEP));
-		}
+		handle_signal(signo, &info, &sigact, regs);
 		return;
 	}
 
-no_signal:
 	/*
 	 * If we came from a system call, handle the restart.
 	 */
@@ -264,10 +231,7 @@ no_signal:
 
 no_restart:
 	/* If there's no signal to deliver, put the saved sigmask back */
-	if (test_thread_flag(TIF_RESTORE_SIGMASK)) {
-		clear_thread_flag(TIF_RESTORE_SIGMASK);
-		sigprocmask(SIG_SETMASK, &current->saved_sigmask, NULL);
-	}
+	restore_saved_sigmask();
 }
 
 void do_notify_resume(struct pt_regs *regs, unsigned long thread_info_flags)
@@ -277,26 +241,22 @@ void do_notify_resume(struct pt_regs *regs, unsigned long thread_info_flags)
 
 	if (thread_info_flags & _TIF_NOTIFY_RESUME) {
 		clear_thread_flag(TIF_NOTIFY_RESUME);
-		if (current->replacement_session_keyring)
-			key_replace_session_keyring();
+		tracehook_notify_resume(regs);
 	}
 }
 
 /*
  * Architecture-specific wrappers for signal-related system calls
  */
-asmlinkage int sys_sigaltstack(const stack_t __user *uss, stack_t __user *uoss)
-{
-	struct pt_regs *regs = current_thread_info()->regs;
-
-	return do_sigaltstack(uss, uoss, regs->r29);
-}
 
 asmlinkage int sys_rt_sigreturn(void)
 {
-	struct pt_regs *regs = current_thread_info()->regs;
+	struct pt_regs *regs = current_pt_regs();
 	struct rt_sigframe __user *frame;
 	sigset_t blocked;
+
+	/* Always make any pending restarted system calls return -EINTR */
+	current_thread_info()->restart_block.fn = do_no_restart_syscall;
 
 	frame = (struct rt_sigframe __user *)pt_psp(regs);
 	if (!access_ok(VERIFY_READ, frame, sizeof(*frame)))
@@ -304,11 +264,7 @@ asmlinkage int sys_rt_sigreturn(void)
 	if (__copy_from_user(&blocked, &frame->uc.uc_sigmask, sizeof(blocked)))
 		goto badframe;
 
-	sigdelsetmask(&blocked, ~_BLOCKABLE);
-	spin_lock_irq(&current->sighand->siglock);
-	current->blocked = blocked;
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	set_current_blocked(&blocked);
 
 	if (restore_sigcontext(regs, &frame->uc.uc_mcontext))
 		goto badframe;
@@ -327,14 +283,7 @@ asmlinkage int sys_rt_sigreturn(void)
 	 */
 	regs->syscall_nr = __NR_rt_sigreturn;
 
-	/*
-	 * If we were meticulous, we'd only call this if we knew that
-	 * we were actually going to use an alternate stack, and we'd
-	 * consider any error to be fatal.  What we do here, in common
-	 * with many other architectures, is call it blindly and only
-	 * consider the -EFAULT return case to be proof of a problem.
-	 */
-	if (do_sigaltstack(&frame->uc.uc_stack, NULL, pt_psp(regs)) == -EFAULT)
+	if (restore_altstack(&frame->uc.uc_stack))
 		goto badframe;
 
 	return 0;

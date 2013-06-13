@@ -95,7 +95,6 @@ static char lancestr[] = "LANCE";
 #include <linux/of_device.h>
 #include <linux/gfp.h>
 
-#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <asm/pgtable.h>
@@ -534,7 +533,7 @@ static void lance_rx_dvma(struct net_device *dev)
 			if (bits & LE_R1_EOP) dev->stats.rx_errors++;
 		} else {
 			len = (rd->mblength & 0xfff) - 4;
-			skb = dev_alloc_skb(len + 2);
+			skb = netdev_alloc_skb(dev, len + 2);
 
 			if (skb == NULL) {
 				printk(KERN_INFO "%s: Memory squeeze, deferring packet.\n",
@@ -706,7 +705,7 @@ static void lance_rx_pio(struct net_device *dev)
 			if (bits & LE_R1_EOP) dev->stats.rx_errors++;
 		} else {
 			len = (sbus_readw(&rd->mblength) & 0xfff) - 4;
-			skb = dev_alloc_skb(len + 2);
+			skb = netdev_alloc_skb(dev, len + 2);
 
 			if (skb == NULL) {
 				printk(KERN_INFO "%s: Memory squeeze, deferring packet.\n",
@@ -1285,8 +1284,8 @@ static void lance_free_hwresources(struct lance_private *lp)
 /* Ethtool support... */
 static void sparc_lance_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
 {
-	strcpy(info->driver, "sunlance");
-	strcpy(info->version, "2.02");
+	strlcpy(info->driver, "sunlance", sizeof(info->driver));
+	strlcpy(info->version, "2.02", sizeof(info->version));
 }
 
 static const struct ethtool_ops sparc_lance_ethtool_ops = {
@@ -1305,9 +1304,9 @@ static const struct net_device_ops sparc_lance_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 };
 
-static int __devinit sparc_lance_probe_one(struct platform_device *op,
-					   struct platform_device *ledma,
-					   struct platform_device *lebuffer)
+static int sparc_lance_probe_one(struct platform_device *op,
+				 struct platform_device *ledma,
+				 struct platform_device *lebuffer)
 {
 	struct device_node *dp = op->dev.of_node;
 	static unsigned version_printed;
@@ -1489,7 +1488,7 @@ fail:
 	return -ENODEV;
 }
 
-static int __devinit sunlance_sbus_probe(struct platform_device *op)
+static int sunlance_sbus_probe(struct platform_device *op)
 {
 	struct platform_device *parent = to_platform_device(op->dev.parent);
 	struct device_node *parent_dp = parent->dev.of_node;
@@ -1505,7 +1504,7 @@ static int __devinit sunlance_sbus_probe(struct platform_device *op)
 	return err;
 }
 
-static int __devexit sunlance_sbus_remove(struct platform_device *op)
+static int sunlance_sbus_remove(struct platform_device *op)
 {
 	struct lance_private *lp = dev_get_drvdata(&op->dev);
 	struct net_device *net_dev = lp->dev;
@@ -1537,7 +1536,7 @@ static struct platform_driver sunlance_sbus_driver = {
 		.of_match_table = sunlance_sbus_match,
 	},
 	.probe		= sunlance_sbus_probe,
-	.remove		= __devexit_p(sunlance_sbus_remove),
+	.remove		= sunlance_sbus_remove,
 };
 
 module_platform_driver(sunlance_sbus_driver);

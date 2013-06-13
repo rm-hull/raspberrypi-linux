@@ -2,6 +2,9 @@
  * Shared support code for AMD K8 northbridges and derivates.
  * Copyright 2006 Andi Kleen, SUSE Labs. Subject to GPLv2.
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/init.h>
@@ -16,6 +19,7 @@ const struct pci_device_id amd_nb_misc_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_K8_NB_MISC) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_10H_NB_MISC) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_15H_NB_F3) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_15H_M10H_F3) },
 	{}
 };
 EXPORT_SYMBOL(amd_nb_misc_ids);
@@ -117,6 +121,37 @@ bool __init early_is_amd_nb(u32 device)
 		if (vendor == id->vendor && device == id->device)
 			return true;
 	return false;
+}
+
+struct resource *amd_get_mmconfig_range(struct resource *res)
+{
+	u32 address;
+	u64 base, msr;
+	unsigned segn_busn_bits;
+
+	if (boot_cpu_data.x86_vendor != X86_VENDOR_AMD)
+		return NULL;
+
+	/* assume all cpus from fam10h have mmconfig */
+        if (boot_cpu_data.x86 < 0x10)
+		return NULL;
+
+	address = MSR_FAM10H_MMIO_CONF_BASE;
+	rdmsrl(address, msr);
+
+	/* mmconfig is not enabled */
+	if (!(msr & FAM10H_MMIO_CONF_ENABLE))
+		return NULL;
+
+	base = msr & (FAM10H_MMIO_CONF_BASE_MASK<<FAM10H_MMIO_CONF_BASE_SHIFT);
+
+	segn_busn_bits = (msr >> FAM10H_MMIO_CONF_BUSRANGE_SHIFT) &
+			 FAM10H_MMIO_CONF_BUSRANGE_MASK;
+
+	res->flags = IORESOURCE_MEM;
+	res->start = base;
+	res->end = base + (1ULL<<(segn_busn_bits + 20)) - 1;
+	return res;
 }
 
 int amd_get_subcaches(int cpu)
@@ -227,7 +262,7 @@ void amd_flush_garts(void)
 	}
 	spin_unlock_irqrestore(&gart_lock, flags);
 	if (!flushed)
-		printk("nothing to flush?\n");
+		pr_notice("nothing to flush?\n");
 }
 EXPORT_SYMBOL_GPL(amd_flush_garts);
 
@@ -238,11 +273,10 @@ static __init int init_amd_nbs(void)
 	err = amd_cache_northbridges();
 
 	if (err < 0)
-		printk(KERN_NOTICE "AMD NB: Cannot enumerate AMD northbridges.\n");
+		pr_notice("Cannot enumerate AMD northbridges\n");
 
 	if (amd_cache_gart() < 0)
-		printk(KERN_NOTICE "AMD NB: Cannot initialize GART flush words, "
-		       "GART support disabled.\n");
+		pr_notice("Cannot initialize GART flush words, GART support disabled\n");
 
 	return err;
 }

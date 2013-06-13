@@ -69,9 +69,9 @@ MODULE_LICENSE("GPL");
 		    vendorName, productName, useProtocol, useTransport, \
 		    initFunction, flags) \
 { USB_DEVICE_VER(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax), \
-  .driver_info = (flags)|(USB_US_TYPE_STOR<<24) }
+  .driver_info = (flags) }
 
-struct usb_device_id jumpshot_usb_ids[] = {
+static struct usb_device_id jumpshot_usb_ids[] = {
 #	include "unusual_jumpshot.h"
 	{ }		/* Terminating entry */
 };
@@ -677,6 +677,7 @@ static struct usb_driver jumpshot_driver = {
 	.post_reset =	usb_stor_post_reset,
 	.id_table =	jumpshot_usb_ids,
 	.soft_unbind =	1,
+	.no_dynamic_id = 1,
 };
 
 module_usb_driver(jumpshot_driver);

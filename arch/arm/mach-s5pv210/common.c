@@ -43,6 +43,7 @@
 #include <plat/iic-core.h>
 #include <plat/keypad-core.h>
 #include <plat/tv-core.h>
+#include <plat/spi-core.h>
 #include <plat/regs-serial.h>
 
 #include "common.h"
@@ -142,14 +143,6 @@ static struct map_desc s5pv210_iodesc[] __initdata = {
 	}
 };
 
-static void s5pv210_idle(void)
-{
-	if (!need_resched())
-		cpu_do_idle();
-
-	local_irq_enable();
-}
-
 void s5pv210_restart(char mode, const char *cmd)
 {
 	__raw_writel(0x1, S5P_SWRESET);
@@ -176,8 +169,6 @@ void __init s5pv210_init_io(struct map_desc *mach_desc, int size)
 
 void __init s5pv210_map_io(void)
 {
-	init_consistent_dma_size(14 << 20);
-
 	/* initialise device information early */
 	s5pv210_default_sdhci0();
 	s5pv210_default_sdhci1();
@@ -204,6 +195,8 @@ void __init s5pv210_map_io(void)
 
 	/* setup TV devices */
 	s5p_hdmi_setname("s5pv210-hdmi");
+
+	s3c64xx_spi_setname("s5pv210-spi");
 }
 
 void __init s5pv210_init_clocks(int xtal)
@@ -247,35 +240,12 @@ core_initcall(s5pv210_core_init);
 int __init s5pv210_init(void)
 {
 	printk(KERN_INFO "S5PV210: Initializing architecture\n");
-
-	/* set idle function */
-	pm_idle = s5pv210_idle;
-
 	return device_register(&s5pv210_dev);
 }
-
-static struct s3c24xx_uart_clksrc s5pv210_serial_clocks[] = {
-	[0] = {
-		.name		= "pclk",
-		.divisor	= 1,
-		.min_baud	= 0,
-		.max_baud	= 0,
-	},
-};
 
 /* uart registration process */
 
 void __init s5pv210_init_uarts(struct s3c2410_uartcfg *cfg, int no)
 {
-	struct s3c2410_uartcfg *tcfg = cfg;
-	u32 ucnt;
-
-	for (ucnt = 0; ucnt < no; ucnt++, tcfg++) {
-		if (!tcfg->clocks) {
-			tcfg->clocks = s5pv210_serial_clocks;
-			tcfg->clocks_size = ARRAY_SIZE(s5pv210_serial_clocks);
-		}
-	}
-
 	s3c24xx_init_uartdevs("s5pv210-uart", s5p_uart_resources, cfg, no);
 }

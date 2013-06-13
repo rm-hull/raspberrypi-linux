@@ -46,9 +46,6 @@ void __init udbg_early_init(void)
 #elif defined(CONFIG_PPC_EARLY_DEBUG_MAPLE)
 	/* Maple real mode debug */
 	udbg_init_maple_realmode();
-#elif defined(CONFIG_PPC_EARLY_DEBUG_ISERIES)
-	/* For iSeries - hit Ctrl-x Ctrl-x to see the output */
-	udbg_init_iseries();
 #elif defined(CONFIG_PPC_EARLY_DEBUG_BEAT)
 	udbg_init_debug_beat();
 #elif defined(CONFIG_PPC_EARLY_DEBUG_PAS_REALMODE)
@@ -123,29 +120,6 @@ int udbg_write(const char *s, int n)
 		udbg_flush();
 
 	return n - remain;
-}
-
-int udbg_read(char *buf, int buflen)
-{
-	char *p = buf;
-	int i, c;
-
-	if (!udbg_getc)
-		return 0;
-
-	for (i = 0; i < buflen; ++i) {
-		do {
-			c = udbg_getc();
-			if (c == -1 && i == 0)
-				return -1;
-
-		} while (c == 0x11 || c == 0x13);
-		if (c == 0 || c == -1)
-			break;
-		*p++ = c;
-	}
-
-	return i;
 }
 
 #define UDBG_BUFSIZE 256

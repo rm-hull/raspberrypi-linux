@@ -35,6 +35,14 @@ struct nphy_rf_control_override_rev3 {
 	u8 val_addr1;
 };
 
+struct nphy_rf_control_override_rev7 {
+	u16 field;
+	u16 val_addr_core0;
+	u16 val_addr_core1;
+	u16 val_mask;
+	u8 val_shift;
+};
+
 struct nphy_gain_ctl_workaround_entry {
 	s8 lna1_gain[4];
 	s8 lna2_gain[4];
@@ -177,16 +185,10 @@ void b43_ntab_write_bulk(struct b43_wldev *dev, u32 offset,
 void b43_nphy_rev0_1_2_tables_init(struct b43_wldev *dev);
 void b43_nphy_rev3plus_tables_init(struct b43_wldev *dev);
 
-extern const u32 b43_ntab_tx_gain_rev0_1_2[];
-extern const u32 b43_ntab_tx_gain_rev3plus_2ghz[];
-extern const u32 b43_ntab_tx_gain_rev3_5ghz[];
-extern const u32 b43_ntab_tx_gain_rev4_5ghz[];
-extern const u32 b43_ntab_tx_gain_rev5plus_5ghz[];
+const u32 *b43_nphy_get_tx_gain_table(struct b43_wldev *dev);
 
-extern const u32 txpwrctrl_tx_gain_ipa[];
-extern const u32 txpwrctrl_tx_gain_ipa_rev5[];
-extern const u32 txpwrctrl_tx_gain_ipa_rev6[];
-extern const u32 txpwrctrl_tx_gain_ipa_5g[];
+extern const s8 b43_ntab_papd_pga_gain_delta_ipa_2g[];
+
 extern const u16 tbl_iqcal_gainparams[2][9][8];
 extern const struct nphy_txiqcal_ladder ladder_lo[];
 extern const struct nphy_txiqcal_ladder ladder_iq[];
@@ -208,5 +210,7 @@ extern const struct nphy_rf_control_override_rev2
 	tbl_rf_control_override_rev2[];
 extern const struct nphy_rf_control_override_rev3
 	tbl_rf_control_override_rev3[];
+const struct nphy_rf_control_override_rev7 *b43_nphy_get_rf_ctl_over_rev7(
+	struct b43_wldev *dev, u16 field, u8 override);
 
 #endif /* B43_TABLES_NPHY_H_ */

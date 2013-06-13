@@ -19,8 +19,8 @@
 #include <linux/backlight.h>
 #include <linux/gfp.h>
 #include <linux/module.h>
+#include <linux/platform_data/atmel.h>
 
-#include <mach/board.h>
 #include <mach/cpu.h>
 #include <asm/gpio.h>
 
@@ -100,8 +100,11 @@ static int atmel_bl_update_status(struct backlight_device *bl)
 		brightness = 0;
 
 	lcdc_writel(sinfo, ATMEL_LCDC_CONTRAST_VAL, brightness);
-	lcdc_writel(sinfo, ATMEL_LCDC_CONTRAST_CTR,
+	if (contrast_ctr & ATMEL_LCDC_POL_POSITIVE)
+		lcdc_writel(sinfo, ATMEL_LCDC_CONTRAST_CTR,
 			brightness ? contrast_ctr : 0);
+	else
+		lcdc_writel(sinfo, ATMEL_LCDC_CONTRAST_CTR, contrast_ctr);
 
 	bl->props.fb_blank = bl->props.power = sinfo->bl_power = power;
 
@@ -418,22 +421,21 @@ static int atmel_lcdfb_check_var(struct fb_var_screeninfo *var,
 		var->red.length = var->green.length = var->blue.length
 			= var->bits_per_pixel;
 		break;
-	case 15:
 	case 16:
-		if (sinfo->lcd_wiring_mode == ATMEL_LCDC_WIRING_RGB) {
-			/* RGB:565 mode */
-			var->red.offset = 11;
-			var->blue.offset = 0;
+		/* Older SOCs use IBGR:555 rather than BGR:565. */
+		if (sinfo->have_intensity_bit)
+			var->green.length = 5;
+		else
 			var->green.length = 6;
-		} else if (sinfo->lcd_wiring_mode == ATMEL_LCDC_WIRING_RGB555) {
-			var->red.offset = 10;
+
+		if (sinfo->lcd_wiring_mode == ATMEL_LCDC_WIRING_RGB) {
+			/* RGB:5X5 mode */
+			var->red.offset = var->green.length + 5;
 			var->blue.offset = 0;
-			var->green.length = 5;
 		} else {
-			/* BGR:555 mode */
+			/* BGR:5X5 mode */
 			var->red.offset = 0;
-			var->blue.offset = 10;
-			var->green.length = 5;
+			var->blue.offset = var->green.length + 5;
 		}
 		var->green.offset = 5;
 		var->red.length = var->blue.length = 5;
@@ -682,14 +684,29 @@ static int atmel_lcdfb_setcolreg(unsigned int regno, unsigned int red,
 
 	case FB_VISUAL_PSEUDOCOLOR:
 		if (regno < 256) {
-			val  = ((red   >> 11) & 0x001f);
-			val |= ((green >>  6) & 0x03e0);
-			val |= ((blue  >>  1) & 0x7c00);
+			if (sinfo->have_intensity_bit) {
+				/* old style I+BGR:555 */
+				val  = ((red   >> 11) & 0x001f);
+				val |= ((green >>  6) & 0x03e0);
+				val |= ((blue  >>  1) & 0x7c00);
 
-			/*
-			 * TODO: intensity bit. Maybe something like
-			 *   ~(red[10] ^ green[10] ^ blue[10]) & 1
-			 */
+				/*
+				 * TODO: intensity bit. Maybe something like
+				 *   ~(red[10] ^ green[10] ^ blue[10]) & 1
+				 */
+			} else {
+				/* new style BGR:565 / RGB:565 */
+				if (sinfo->lcd_wiring_mode ==
+				    ATMEL_LCDC_WIRING_RGB) {
+					val  = ((blue >> 11) & 0x001f);
+					val |= ((red  >>  0) & 0xf800);
+				} else {
+					val  = ((red  >> 11) & 0x001f);
+					val |= ((blue >>  0) & 0xf800);
+				}
+
+				val |= ((green >>  5) & 0x07e0);
+			}
 
 			lcdc_writel(sinfo, ATMEL_LCDC_LUT(regno), val);
 			ret = 0;
@@ -857,6 +874,10 @@ static int __init atmel_lcdfb_probe(struct platform_device *pdev)
 	}
 	sinfo->info = info;
 	sinfo->pdev = pdev;
+	if (cpu_is_at91sam9261() || cpu_is_at91sam9263() ||
+							cpu_is_at91sam9rl()) {
+		sinfo->have_intensity_bit = true;
+	}
 
 	strcpy(info->fix.id, sinfo->pdev->name);
 	info->flags = ATMEL_LCDFB_FBINFO_DEFAULT;
@@ -918,15 +939,17 @@ static int __init atmel_lcdfb_probe(struct platform_device *pdev)
 		}
 
 		info->screen_base = ioremap(info->fix.smem_start, info->fix.smem_len);
-		if (!info->screen_base)
+		if (!info->screen_base) {
+			ret = -ENOMEM;
 			goto release_intmem;
+		}
 
 		/*
 		 * Don't clear the framebuffer -- someone may have set
 		 * up a splash image.
 		 */
 	} else {
-		/* alocate memory buffer */
+		/* allocate memory buffer */
 		ret = atmel_lcdfb_alloc_video_memory(sinfo);
 		if (ret < 0) {
 			dev_err(dev, "cannot allocate framebuffer: %d\n", ret);
@@ -947,6 +970,7 @@ static int __init atmel_lcdfb_probe(struct platform_device *pdev)
 	sinfo->mmio = ioremap(info->fix.mmio_start, info->fix.mmio_len);
 	if (!sinfo->mmio) {
 		dev_err(dev, "cannot map LCDC registers\n");
+		ret = -ENOMEM;
 		goto release_mem;
 	}
 
@@ -1089,7 +1113,7 @@ static int atmel_lcdfb_suspend(struct platform_device *pdev, pm_message_t mesg)
 	 */
 	lcdc_writel(sinfo, ATMEL_LCDC_IDR, ~0UL);
 
-	sinfo->saved_lcdcon = lcdc_readl(sinfo, ATMEL_LCDC_CONTRAST_VAL);
+	sinfo->saved_lcdcon = lcdc_readl(sinfo, ATMEL_LCDC_CONTRAST_CTR);
 	lcdc_writel(sinfo, ATMEL_LCDC_CONTRAST_CTR, 0);
 	if (sinfo->atmel_lcdfb_power_control)
 		sinfo->atmel_lcdfb_power_control(0);

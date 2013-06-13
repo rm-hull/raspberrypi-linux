@@ -104,9 +104,10 @@ ieee80211_rx_h_michael_mic_verify(struct ieee80211_rx_data *rx)
 	 */
 	if (status->flag & (RX_FLAG_MMIC_STRIPPED | RX_FLAG_IV_STRIPPED)) {
 		if (status->flag & RX_FLAG_MMIC_ERROR)
-			goto mic_fail;
+			goto mic_fail_no_key;
 
-		if (!(status->flag & RX_FLAG_IV_STRIPPED))
+		if (!(status->flag & RX_FLAG_IV_STRIPPED) && rx->key &&
+		    rx->key->conf.cipher == WLAN_CIPHER_SUITE_TKIP)
 			goto update_iv;
 
 		return RX_CONTINUE;
@@ -138,6 +139,10 @@ ieee80211_rx_h_michael_mic_verify(struct ieee80211_rx_data *rx)
 	if (skb->len < hdrlen + MICHAEL_MIC_LEN)
 		return RX_DROP_UNUSABLE;
 
+	if (skb_linearize(rx->skb))
+		return RX_DROP_UNUSABLE;
+	hdr = (void *)skb->data;
+
 	data = skb->data + hdrlen;
 	data_len = skb->len - hdrlen - MICHAEL_MIC_LEN;
 	key = &rx->key->conf.key[NL80211_TKIP_DATA_OFFSET_RX_MIC_KEY];
@@ -156,6 +161,9 @@ update_iv:
 	return RX_CONTINUE;
 
 mic_fail:
+	rx->key->u.tkip.mic_failures++;
+
+mic_fail_no_key:
 	/*
 	 * In some cases the key can be unset - e.g. a multicast packet, in
 	 * a driver that supports HW encryption. Send up the key idx only if
@@ -173,13 +181,13 @@ static int tkip_encrypt_skb(struct ieee80211_tx_data *tx, struct sk_buff *skb)
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
 	struct ieee80211_key *key = tx->key;
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
-	unsigned long flags;
 	unsigned int hdrlen;
 	int len, tail;
 	u8 *pos;
 
 	if (info->control.hw_key &&
-	    !(info->control.hw_key->flags & IEEE80211_KEY_FLAG_GENERATE_IV)) {
+	    !(info->control.hw_key->flags & IEEE80211_KEY_FLAG_GENERATE_IV) &&
+	    !(info->control.hw_key->flags & IEEE80211_KEY_FLAG_PUT_IV_SPACE)) {
 		/* hwaccel - with no need for software-generated IV */
 		return 0;
 	}
@@ -198,15 +206,21 @@ static int tkip_encrypt_skb(struct ieee80211_tx_data *tx, struct sk_buff *skb)
 
 	pos = skb_push(skb, TKIP_IV_LEN);
 	memmove(pos, pos + TKIP_IV_LEN, hdrlen);
+	skb_set_network_header(skb, skb_network_offset(skb) + TKIP_IV_LEN);
 	pos += hdrlen;
 
+	/* the HW only needs room for the IV, but not the actual IV */
+	if (info->control.hw_key &&
+	    (info->control.hw_key->flags & IEEE80211_KEY_FLAG_PUT_IV_SPACE))
+		return 0;
+
 	/* Increase IV for the frame */
-	spin_lock_irqsave(&key->u.tkip.txlock, flags);
+	spin_lock(&key->u.tkip.txlock);
 	key->u.tkip.tx.iv16++;
 	if (key->u.tkip.tx.iv16 == 0)
 		key->u.tkip.tx.iv32++;
 	pos = ieee80211_tkip_add_iv(pos, key);
-	spin_unlock_irqrestore(&key->u.tkip.txlock, flags);
+	spin_unlock(&key->u.tkip.txlock);
 
 	/* hwaccel - with software IV */
 	if (info->control.hw_key)
@@ -252,6 +266,11 @@ ieee80211_crypto_tkip_decrypt(struct ieee80211_rx_data *rx)
 
 	if (!rx->sta || skb->len - hdrlen < 12)
 		return RX_DROP_UNUSABLE;
+
+	/* it may be possible to optimize this a bit more */
+	if (skb_linearize(rx->skb))
+		return RX_DROP_UNUSABLE;
+	hdr = (void *)skb->data;
 
 	/*
 	 * Let TKIP code verify IV, but skip decryption.
@@ -413,6 +432,7 @@ static int ccmp_encrypt_skb(struct ieee80211_tx_data *tx, struct sk_buff *skb)
 
 	pos = skb_push(skb, CCMP_HDR_LEN);
 	memmove(pos, pos + CCMP_HDR_LEN, hdrlen);
+	skb_set_network_header(skb, skb_network_offset(skb) + CCMP_HDR_LEN);
 
 	/* the HW only needs room for the IV, but not the actual IV */
 	if (info->control.hw_key &&
@@ -484,6 +504,14 @@ ieee80211_crypto_ccmp_decrypt(struct ieee80211_rx_data *rx)
 	if (!rx->sta || data_len < 0)
 		return RX_DROP_UNUSABLE;
 
+	if (status->flag & RX_FLAG_DECRYPTED) {
+		if (!pskb_may_pull(rx->skb, hdrlen + CCMP_HDR_LEN))
+			return RX_DROP_UNUSABLE;
+	} else {
+		if (skb_linearize(rx->skb))
+			return RX_DROP_UNUSABLE;
+	}
+
 	ccmp_hdr2pn(pn, skb->data + hdrlen);
 
 	queue = rx->security_idx;
@@ -509,7 +537,8 @@ ieee80211_crypto_ccmp_decrypt(struct ieee80211_rx_data *rx)
 	memcpy(key->u.ccmp.rx_pn[queue], pn, CCMP_PN_LEN);
 
 	/* Remove CCMP header and MIC */
-	skb_trim(skb, skb->len - CCMP_MIC_LEN);
+	if (pskb_trim(skb, skb->len - CCMP_MIC_LEN))
+		return RX_DROP_UNUSABLE;
 	memmove(skb->data + CCMP_HDR_LEN, skb->data, hdrlen);
 	skb_pull(skb, CCMP_HDR_LEN);
 
@@ -519,14 +548,19 @@ ieee80211_crypto_ccmp_decrypt(struct ieee80211_rx_data *rx)
 
 static void bip_aad(struct sk_buff *skb, u8 *aad)
 {
+	__le16 mask_fc;
+	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
+
 	/* BIP AAD: FC(masked) || A1 || A2 || A3 */
 
 	/* FC type/subtype */
-	aad[0] = skb->data[0];
 	/* Mask FC Retry, PwrMgt, MoreData flags to zero */
-	aad[1] = skb->data[1] & ~(BIT(4) | BIT(5) | BIT(6));
+	mask_fc = hdr->frame_control;
+	mask_fc &= ~cpu_to_le16(IEEE80211_FCTL_RETRY | IEEE80211_FCTL_PM |
+				IEEE80211_FCTL_MOREDATA);
+	put_unaligned(mask_fc, (__le16 *) &aad[0]);
 	/* A1 || A2 || A3 */
-	memcpy(aad + 2, skb->data + 4, 3 * ETH_ALEN);
+	memcpy(aad + 2, &hdr->addr1, 3 * ETH_ALEN);
 }
 
 
@@ -609,6 +643,8 @@ ieee80211_crypto_aes_cmac_decrypt(struct ieee80211_rx_data *rx)
 	if (!ieee80211_is_mgmt(hdr->frame_control))
 		return RX_CONTINUE;
 
+	/* management frames are already linear */
+
 	if (skb->len < 24 + sizeof(*mmie))
 		return RX_DROP_UNUSABLE;
 
@@ -642,4 +678,23 @@ ieee80211_crypto_aes_cmac_decrypt(struct ieee80211_rx_data *rx)
 	skb_trim(skb, skb->len - sizeof(*mmie));
 
 	return RX_CONTINUE;
+}
+
+ieee80211_tx_result
+ieee80211_crypto_hw_encrypt(struct ieee80211_tx_data *tx)
+{
+	struct sk_buff *skb;
+	struct ieee80211_tx_info *info = NULL;
+
+	skb_queue_walk(&tx->skbs, skb) {
+		info  = IEEE80211_SKB_CB(skb);
+
+		/* handle hw-only algorithm */
+		if (!info->control.hw_key)
+			return TX_DROP;
+	}
+
+	ieee80211_tx_set_protected(tx);
+
+	return TX_CONTINUE;
 }

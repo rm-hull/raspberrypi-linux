@@ -4,9 +4,17 @@ config SCORE
        def_bool y
        select HAVE_GENERIC_HARDIRQS
        select GENERIC_IRQ_SHOW
+       select GENERIC_IOMAP
+       select GENERIC_ATOMIC64
        select HAVE_MEMBLOCK
        select HAVE_MEMBLOCK_NODE_MAP
        select ARCH_DISCARD_MEMBLOCK
+       select GENERIC_CPU_DEVICES
+       select GENERIC_CLOCKEVENTS
+       select HAVE_MOD_ARCH_SPECIFIC
+	select VIRT_TO_BUS
+	select MODULES_USE_ELF_REL
+	select CLONE_BACKWARDS
 
 choice
 	prompt "System type"
@@ -36,9 +44,6 @@ endmenu
 config CPU_SCORE7
 	bool
 
-config GENERIC_IOMAP
-	def_bool y
-
 config NO_DMA
 	bool
 	default y
@@ -50,9 +55,6 @@ config GENERIC_HWEIGHT
 	def_bool y
 
 config GENERIC_CALIBRATE_DELAY
-	def_bool y
-
-config GENERIC_CLOCKEVENTS
 	def_bool y
 
 menu "Kernel type"
@@ -69,7 +71,6 @@ config MEMORY_START
 	hex
 	default	0xa0000000
 
-source "kernel/time/Kconfig"
 source "kernel/Kconfig.hz"
 source "kernel/Kconfig.preempt"
 

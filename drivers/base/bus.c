@@ -21,8 +21,7 @@
 #include "power/power.h"
 
 /* /sys/devices/system */
-/* FIXME: make static after drivers/base/sys.c is deleted */
-struct kset *system_kset;
+static struct kset *system_kset;
 
 #define to_bus_attr(_attr) container_of(_attr, struct bus_attribute, attr)
 
@@ -165,8 +164,6 @@ static const struct kset_uevent_ops bus_uevent_ops = {
 
 static struct kset *bus_kset;
 
-
-#ifdef CONFIG_HOTPLUG
 /* Manually detach a device from its associated driver. */
 static ssize_t driver_unbind(struct device_driver *drv,
 			     const char *buf, size_t count)
@@ -253,7 +250,6 @@ static ssize_t store_drivers_probe(struct bus_type *bus,
 		return -EINVAL;
 	return count;
 }
-#endif
 
 static struct device *next_device(struct klist_iter *i)
 {
@@ -294,7 +290,7 @@ int bus_for_each_dev(struct bus_type *bus, struct device *start,
 	struct device *dev;
 	int error = 0;
 
-	if (!bus)
+	if (!bus || !bus->p)
 		return -EINVAL;
 
 	klist_iter_init_node(&bus->p->klist_devices, &i,
@@ -328,7 +324,7 @@ struct device *bus_find_device(struct bus_type *bus,
 	struct klist_iter i;
 	struct device *dev;
 
-	if (!bus)
+	if (!bus || !bus->p)
 		return NULL;
 
 	klist_iter_init_node(&bus->p->klist_devices, &i,
@@ -619,11 +615,6 @@ static void driver_remove_attrs(struct bus_type *bus,
 	}
 }
 
-#ifdef CONFIG_HOTPLUG
-/*
- * Thanks to drivers making their tables __devinit, we can't allow manual
- * bind and unbind from userspace unless CONFIG_HOTPLUG is enabled.
- */
 static int __must_check add_bind_files(struct device_driver *drv)
 {
 	int ret;
@@ -667,12 +658,6 @@ static void remove_probe_files(struct bus_type *bus)
 	bus_remove_file(bus, &bus_attr_drivers_autoprobe);
 	bus_remove_file(bus, &bus_attr_drivers_probe);
 }
-#else
-static inline int add_bind_files(struct device_driver *drv) { return 0; }
-static inline void remove_bind_files(struct device_driver *drv) {}
-static inline int add_probe_files(struct bus_type *bus) { return 0; }
-static inline void remove_probe_files(struct bus_type *bus) {}
-#endif
 
 static ssize_t driver_uevent_store(struct device_driver *drv,
 				   const char *buf, size_t count)
@@ -715,12 +700,12 @@ int bus_add_driver(struct device_driver *drv)
 	if (error)
 		goto out_unregister;
 
+	klist_add_tail(&priv->knode_bus, &bus->p->klist_drivers);
 	if (drv->bus->p->drivers_autoprobe) {
 		error = driver_attach(drv);
 		if (error)
 			goto out_unregister;
 	}
-	klist_add_tail(&priv->knode_bus, &bus->p->klist_drivers);
 	module_add_driver(drv->owner, drv);
 
 	error = driver_create_file(drv, &driver_attr_uevent);
@@ -744,7 +729,6 @@ int bus_add_driver(struct device_driver *drv)
 		}
 	}
 
-	kobject_uevent(&priv->kobj, KOBJ_ADD);
 	return 0;
 
 out_unregister:
@@ -915,9 +899,10 @@ static BUS_ATTR(uevent, S_IWUSR, NULL, bus_uevent_store);
 
 /**
  * __bus_register - register a driver-core subsystem
- * @bus: bus.
+ * @bus: bus to register
+ * @key: lockdep class key
  *
- * Once we have that, we registered the bus with the kobject
+ * Once we have that, we register the bus with the kobject
  * infrastructure, then register the children subsystems it has:
  * the devices and drivers that belong to the subsystem.
  */
@@ -1193,12 +1178,14 @@ EXPORT_SYMBOL_GPL(subsys_interface_register);
 
 void subsys_interface_unregister(struct subsys_interface *sif)
 {
-	struct bus_type *subsys = sif->subsys;
+	struct bus_type *subsys;
 	struct subsys_dev_iter iter;
 	struct device *dev;
 
-	if (!sif)
+	if (!sif || !sif->subsys)
 		return;
+
+	subsys = sif->subsys;
 
 	mutex_lock(&subsys->p->mutex);
 	list_del_init(&sif->node);
@@ -1220,8 +1207,8 @@ static void system_root_device_release(struct device *dev)
 }
 /**
  * subsys_system_register - register a subsystem at /sys/devices/system/
- * @subsys - system subsystem
- * @groups - default attributes for the root device
+ * @subsys: system subsystem
+ * @groups: default attributes for the root device
  *
  * All 'system' subsystems have a /sys/devices/system/<name> root device
  * with the name of the subsystem. The root device can carry subsystem-

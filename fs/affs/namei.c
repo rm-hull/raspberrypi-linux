@@ -211,7 +211,7 @@ affs_find_entry(struct inode *dir, struct dentry *dentry)
 }
 
 struct dentry *
-affs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
+affs_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 {
 	struct super_block *sb = dir->i_sb;
 	struct buffer_head *bh;
@@ -255,13 +255,13 @@ affs_unlink(struct inode *dir, struct dentry *dentry)
 }
 
 int
-affs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidata *nd)
+affs_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool excl)
 {
 	struct super_block *sb = dir->i_sb;
 	struct inode	*inode;
 	int		 error;
 
-	pr_debug("AFFS: create(%lu,\"%.*s\",0%o)\n",dir->i_ino,(int)dentry->d_name.len,
+	pr_debug("AFFS: create(%lu,\"%.*s\",0%ho)\n",dir->i_ino,(int)dentry->d_name.len,
 		 dentry->d_name.name,mode);
 
 	inode = affs_new_inode(dir);
@@ -285,12 +285,12 @@ affs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidata
 }
 
 int
-affs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
+affs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 {
 	struct inode		*inode;
 	int			 error;
 
-	pr_debug("AFFS: mkdir(%lu,\"%.*s\",0%o)\n",dir->i_ino,
+	pr_debug("AFFS: mkdir(%lu,\"%.*s\",0%ho)\n",dir->i_ino,
 		 (int)dentry->d_name.len,dentry->d_name.name,mode);
 
 	inode = affs_new_inode(dir);

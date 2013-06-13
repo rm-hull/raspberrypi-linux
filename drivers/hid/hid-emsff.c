@@ -140,7 +140,7 @@ err:
 }
 
 static const struct hid_device_id ems_devices[] = {
-	{ HID_USB_DEVICE(USB_VENDOR_ID_EMS, 0x118) },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_EMS, USB_DEVICE_ID_EMS_TRIO_LINKER_PLUS_II) },
 	{ }
 };
 MODULE_DEVICE_TABLE(hid, ems_devices);
@@ -150,18 +150,7 @@ static struct hid_driver ems_driver = {
 	.id_table = ems_devices,
 	.probe = ems_probe,
 };
+module_hid_driver(ems_driver);
 
-static int ems_init(void)
-{
-	return hid_register_driver(&ems_driver);
-}
-
-static void ems_exit(void)
-{
-	hid_unregister_driver(&ems_driver);
-}
-
-module_init(ems_init);
-module_exit(ems_exit);
 MODULE_LICENSE("GPL");
 

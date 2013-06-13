@@ -142,10 +142,10 @@ static int tmp401_register_to_temp(u16 reg, u8 config)
 static u16 tmp401_temp_to_register(long temp, u8 config)
 {
 	if (config & TMP401_CONFIG_RANGE) {
-		temp = SENSORS_LIMIT(temp, -64000, 191000);
+		temp = clamp_val(temp, -64000, 191000);
 		temp += 64000;
 	} else
-		temp = SENSORS_LIMIT(temp, 0, 127000);
+		temp = clamp_val(temp, 0, 127000);
 
 	return (temp * 160 + 312) / 625;
 }
@@ -163,10 +163,10 @@ static int tmp401_crit_register_to_temp(u8 reg, u8 config)
 static u8 tmp401_crit_temp_to_register(long temp, u8 config)
 {
 	if (config & TMP401_CONFIG_RANGE) {
-		temp = SENSORS_LIMIT(temp, -64000, 191000);
+		temp = clamp_val(temp, -64000, 191000);
 		temp += 64000;
 	} else
-		temp = SENSORS_LIMIT(temp, 0, 127000);
+		temp = clamp_val(temp, 0, 127000);
 
 	return (temp + 500) / 1000;
 }
@@ -334,7 +334,7 @@ static ssize_t store_temp_min(struct device *dev, struct device_attribute
 	long val;
 	u16 reg;
 
-	if (strict_strtol(buf, 10, &val))
+	if (kstrtol(buf, 10, &val))
 		return -EINVAL;
 
 	reg = tmp401_temp_to_register(val, data->config);
@@ -361,7 +361,7 @@ static ssize_t store_temp_max(struct device *dev, struct device_attribute
 	long val;
 	u16 reg;
 
-	if (strict_strtol(buf, 10, &val))
+	if (kstrtol(buf, 10, &val))
 		return -EINVAL;
 
 	reg = tmp401_temp_to_register(val, data->config);
@@ -388,7 +388,7 @@ static ssize_t store_temp_crit(struct device *dev, struct device_attribute
 	long val;
 	u8 reg;
 
-	if (strict_strtol(buf, 10, &val))
+	if (kstrtol(buf, 10, &val))
 		return -EINVAL;
 
 	reg = tmp401_crit_temp_to_register(val, data->config);
@@ -413,18 +413,18 @@ static ssize_t store_temp_crit_hyst(struct device *dev, struct device_attribute
 	long val;
 	u8 reg;
 
-	if (strict_strtol(buf, 10, &val))
+	if (kstrtol(buf, 10, &val))
 		return -EINVAL;
 
 	if (data->config & TMP401_CONFIG_RANGE)
-		val = SENSORS_LIMIT(val, -64000, 191000);
+		val = clamp_val(val, -64000, 191000);
 	else
-		val = SENSORS_LIMIT(val, 0, 127000);
+		val = clamp_val(val, 0, 127000);
 
 	mutex_lock(&data->update_lock);
 	temp = tmp401_crit_register_to_temp(data->temp_crit[index],
 						data->config);
-	val = SENSORS_LIMIT(val, temp - 255000, temp);
+	val = clamp_val(val, temp - 255000, temp);
 	reg = ((temp - val) + 500) / 1000;
 
 	i2c_smbus_write_byte_data(to_i2c_client(dev),
@@ -447,7 +447,7 @@ static ssize_t reset_temp_history(struct device *dev,
 {
 	long val;
 
-	if (strict_strtol(buf, 10, &val))
+	if (kstrtol(buf, 10, &val))
 		return -EINVAL;
 
 	if (val != 1) {
@@ -594,7 +594,6 @@ static int tmp401_remove(struct i2c_client *client)
 					   &tmp411_attr[i].dev_attr);
 	}
 
-	kfree(data);
 	return 0;
 }
 
@@ -605,7 +604,8 @@ static int tmp401_probe(struct i2c_client *client,
 	struct tmp401_data *data;
 	const char *names[] = { "TMP401", "TMP411" };
 
-	data = kzalloc(sizeof(struct tmp401_data), GFP_KERNEL);
+	data = devm_kzalloc(&client->dev, sizeof(struct tmp401_data),
+			    GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
 
@@ -624,7 +624,7 @@ static int tmp401_probe(struct i2c_client *client,
 			goto exit_remove;
 	}
 
-	/* Register aditional tmp411 sysfs hooks */
+	/* Register additional tmp411 sysfs hooks */
 	if (data->kind == tmp411) {
 		for (i = 0; i < ARRAY_SIZE(tmp411_attr); i++) {
 			err = device_create_file(&client->dev,
@@ -646,7 +646,7 @@ static int tmp401_probe(struct i2c_client *client,
 	return 0;
 
 exit_remove:
-	tmp401_remove(client); /* will also free data for us */
+	tmp401_remove(client);
 	return err;
 }
 
@@ -662,19 +662,8 @@ static struct i2c_driver tmp401_driver = {
 	.address_list	= normal_i2c,
 };
 
-static int __init tmp401_init(void)
-{
-	return i2c_add_driver(&tmp401_driver);
-}
-
-static void __exit tmp401_exit(void)
-{
-	i2c_del_driver(&tmp401_driver);
-}
+module_i2c_driver(tmp401_driver);
 
 MODULE_AUTHOR("Hans de Goede <hdegoede@redhat.com>");
 MODULE_DESCRIPTION("Texas Instruments TMP401 temperature sensor driver");
 MODULE_LICENSE("GPL");
-
-module_init(tmp401_init);
-module_exit(tmp401_exit);

@@ -95,12 +95,12 @@ static struct sdhci_pltfm_data sdhci_cns3xxx_pdata = {
 		  SDHCI_QUIRK_NONSTANDARD_CLOCK,
 };
 
-static int __devinit sdhci_cns3xxx_probe(struct platform_device *pdev)
+static int sdhci_cns3xxx_probe(struct platform_device *pdev)
 {
 	return sdhci_pltfm_register(pdev, &sdhci_cns3xxx_pdata);
 }
 
-static int __devexit sdhci_cns3xxx_remove(struct platform_device *pdev)
+static int sdhci_cns3xxx_remove(struct platform_device *pdev)
 {
 	return sdhci_pltfm_unregister(pdev);
 }
@@ -112,20 +112,10 @@ static struct platform_driver sdhci_cns3xxx_driver = {
 		.pm	= SDHCI_PLTFM_PMOPS,
 	},
 	.probe		= sdhci_cns3xxx_probe,
-	.remove		= __devexit_p(sdhci_cns3xxx_remove),
+	.remove		= sdhci_cns3xxx_remove,
 };
 
-static int __init sdhci_cns3xxx_init(void)
-{
-	return platform_driver_register(&sdhci_cns3xxx_driver);
-}
-module_init(sdhci_cns3xxx_init);
-
-static void __exit sdhci_cns3xxx_exit(void)
-{
-	platform_driver_unregister(&sdhci_cns3xxx_driver);
-}
-module_exit(sdhci_cns3xxx_exit);
+module_platform_driver(sdhci_cns3xxx_driver);
 
 MODULE_DESCRIPTION("SDHCI driver for CNS3xxx");
 MODULE_AUTHOR("Scott Shu, "

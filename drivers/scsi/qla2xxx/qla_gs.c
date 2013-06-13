@@ -1,10 +1,11 @@
 /*
  * QLogic Fibre Channel HBA Driver
- * Copyright (c)  2003-2011 QLogic Corporation
+ * Copyright (c)  2003-2013 QLogic Corporation
  *
  * See LICENSE.qla2xxx for copyright and licensing details.
  */
 #include "qla_def.h"
+#include "qla_target.h"
 
 static int qla2x00_sns_ga_nxt(scsi_qla_host_t *, fc_port_t *);
 static int qla2x00_sns_gid_pt(scsi_qla_host_t *, sw_info_t *);
@@ -217,6 +218,9 @@ qla2x00_ga_nxt(scsi_qla_host_t *vha, fc_port_t *fcport)
 		memcpy(fcport->port_name, ct_rsp->rsp.ga_nxt.port_name,
 		    WWN_SIZE);
 
+		fcport->fc4_type = (ct_rsp->rsp.ga_nxt.fc4_types[2] & BIT_0) ?
+		    FC4_TYPE_FCP_SCSI : FC4_TYPE_OTHER;
+
 		if (ct_rsp->rsp.ga_nxt.port_type != NS_N_PORT_TYPE &&
 		    ct_rsp->rsp.ga_nxt.port_type != NS_NL_PORT_TYPE)
 			fcport->d_id.b.domain = 0xf0;
@@ -240,6 +244,12 @@ qla2x00_ga_nxt(scsi_qla_host_t *vha, fc_port_t *fcport)
 	return (rval);
 }
 
+static inline int
+qla2x00_gid_pt_rsp_size(scsi_qla_host_t *vha)
+{
+	return vha->hw->max_fibre_devices * 4 + 16;
+}
+
 /**
  * qla2x00_gid_pt() - SNS scan for fabric devices via GID_PT command.
  * @ha: HA context
@@ -261,20 +271,21 @@ qla2x00_gid_pt(scsi_qla_host_t *vha, sw_info_t *list)
 
 	struct ct_sns_gid_pt_data *gid_data;
 	struct qla_hw_data *ha = vha->hw;
+	uint16_t gid_pt_rsp_size;
 
 	if (IS_QLA2100(ha) || IS_QLA2200(ha))
 		return qla2x00_sns_gid_pt(vha, list);
 
 	gid_data = NULL;
-
+	gid_pt_rsp_size = qla2x00_gid_pt_rsp_size(vha);
 	/* Issue GID_PT */
 	/* Prepare common MS IOCB */
 	ms_pkt = ha->isp_ops->prep_ms_iocb(vha, GID_PT_REQ_SIZE,
-	    GID_PT_RSP_SIZE);
+	    gid_pt_rsp_size);
 
 	/* Prepare CT request */
 	ct_req = qla2x00_prep_ct_req(&ha->ct_sns->p.req, GID_PT_CMD,
-	    GID_PT_RSP_SIZE);
+	    gid_pt_rsp_size);
 	ct_rsp = &ha->ct_sns->p.rsp;
 
 	/* Prepare CT arguments -- port_type */
@@ -292,7 +303,7 @@ qla2x00_gid_pt(scsi_qla_host_t *vha, sw_info_t *list)
 		rval = QLA_FUNCTION_FAILED;
 	} else {
 		/* Set port IDs in switch info list. */
-		for (i = 0; i < MAX_FIBRE_DEVICES; i++) {
+		for (i = 0; i < ha->max_fibre_devices; i++) {
 			gid_data = &ct_rsp->rsp.gid_pt.entries[i];
 			list[i].d_id.b.domain = gid_data->port_id[0];
 			list[i].d_id.b.area = gid_data->port_id[1];
@@ -313,7 +324,7 @@ qla2x00_gid_pt(scsi_qla_host_t *vha, sw_info_t *list)
 		 * single call.  Return a failed status, and let GA_NXT handle
 		 * the overload.
 		 */
-		if (i == MAX_FIBRE_DEVICES)
+		if (i == ha->max_fibre_devices)
 			rval = QLA_FUNCTION_FAILED;
 	}
 
@@ -330,7 +341,7 @@ qla2x00_gid_pt(scsi_qla_host_t *vha, sw_info_t *list)
 int
 qla2x00_gpn_id(scsi_qla_host_t *vha, sw_info_t *list)
 {
-	int		rval;
+	int		rval = QLA_SUCCESS;
 	uint16_t	i;
 
 	ms_iocb_entry_t	*ms_pkt;
@@ -341,7 +352,7 @@ qla2x00_gpn_id(scsi_qla_host_t *vha, sw_info_t *list)
 	if (IS_QLA2100(ha) || IS_QLA2200(ha))
 		return qla2x00_sns_gpn_id(vha, list);
 
-	for (i = 0; i < MAX_FIBRE_DEVICES; i++) {
+	for (i = 0; i < ha->max_fibre_devices; i++) {
 		/* Issue GPN_ID */
 		/* Prepare common MS IOCB */
 		ms_pkt = ha->isp_ops->prep_ms_iocb(vha, GPN_ID_REQ_SIZE,
@@ -364,9 +375,11 @@ qla2x00_gpn_id(scsi_qla_host_t *vha, sw_info_t *list)
 			/*EMPTY*/
 			ql_dbg(ql_dbg_disc, vha, 0x2056,
 			    "GPN_ID issue IOCB failed (%d).\n", rval);
+			break;
 		} else if (qla2x00_chk_ms_status(vha, ms_pkt, ct_rsp,
 		    "GPN_ID") != QLA_SUCCESS) {
 			rval = QLA_FUNCTION_FAILED;
+			break;
 		} else {
 			/* Save portname */
 			memcpy(list[i].port_name,
@@ -391,7 +404,7 @@ qla2x00_gpn_id(scsi_qla_host_t *vha, sw_info_t *list)
 int
 qla2x00_gnn_id(scsi_qla_host_t *vha, sw_info_t *list)
 {
-	int		rval;
+	int		rval = QLA_SUCCESS;
 	uint16_t	i;
 	struct qla_hw_data *ha = vha->hw;
 	ms_iocb_entry_t	*ms_pkt;
@@ -401,7 +414,7 @@ qla2x00_gnn_id(scsi_qla_host_t *vha, sw_info_t *list)
 	if (IS_QLA2100(ha) || IS_QLA2200(ha))
 		return qla2x00_sns_gnn_id(vha, list);
 
-	for (i = 0; i < MAX_FIBRE_DEVICES; i++) {
+	for (i = 0; i < ha->max_fibre_devices; i++) {
 		/* Issue GNN_ID */
 		/* Prepare common MS IOCB */
 		ms_pkt = ha->isp_ops->prep_ms_iocb(vha, GNN_ID_REQ_SIZE,
@@ -424,9 +437,11 @@ qla2x00_gnn_id(scsi_qla_host_t *vha, sw_info_t *list)
 			/*EMPTY*/
 			ql_dbg(ql_dbg_disc, vha, 0x2057,
 			    "GNN_ID issue IOCB failed (%d).\n", rval);
+			break;
 		} else if (qla2x00_chk_ms_status(vha, ms_pkt, ct_rsp,
 		    "GNN_ID") != QLA_SUCCESS) {
 			rval = QLA_FUNCTION_FAILED;
+			break;
 		} else {
 			/* Save nodename */
 			memcpy(list[i].node_name,
@@ -545,7 +560,8 @@ qla2x00_rff_id(scsi_qla_host_t *vha)
 	ct_req->req.rff_id.port_id[1] = vha->d_id.b.area;
 	ct_req->req.rff_id.port_id[2] = vha->d_id.b.al_pa;
 
-	ct_req->req.rff_id.fc4_feature = BIT_1;
+	qlt_rff_id(vha, ct_req);
+
 	ct_req->req.rff_id.fc4_type = 0x08;		/* SCSI - FCP */
 
 	/* Execute MS IOCB */
@@ -735,7 +751,7 @@ qla2x00_prep_sns_cmd(scsi_qla_host_t *vha, uint16_t cmd, uint16_t scmd_len,
 static int
 qla2x00_sns_ga_nxt(scsi_qla_host_t *vha, fc_port_t *fcport)
 {
-	int		rval;
+	int		rval = QLA_SUCCESS;
 	struct qla_hw_data *ha = vha->hw;
 	struct sns_cmd_pkt	*sns_cmd;
 
@@ -758,7 +774,7 @@ qla2x00_sns_ga_nxt(scsi_qla_host_t *vha, fc_port_t *fcport)
 		    "GA_NXT Send SNS failed (%d).\n", rval);
 	} else if (sns_cmd->p.gan_data[8] != 0x80 ||
 	    sns_cmd->p.gan_data[9] != 0x02) {
-		ql_dbg(ql_dbg_disc + ql_dbg_buffer, vha, 0x207d,
+		ql_dbg(ql_dbg_disc + ql_dbg_buffer, vha, 0x2084,
 		    "GA_NXT failed, rejected request ga_nxt_rsp:\n");
 		ql_dump_buffer(ql_dbg_disc + ql_dbg_buffer, vha, 0x2074,
 		    sns_cmd->p.gan_data, 16);
@@ -814,11 +830,14 @@ qla2x00_sns_gid_pt(scsi_qla_host_t *vha, sw_info_t *list)
 	uint16_t	i;
 	uint8_t		*entry;
 	struct sns_cmd_pkt	*sns_cmd;
+	uint16_t gid_pt_sns_data_size;
+
+	gid_pt_sns_data_size = qla2x00_gid_pt_rsp_size(vha);
 
 	/* Issue GID_PT. */
 	/* Prepare SNS command request. */
 	sns_cmd = qla2x00_prep_sns_cmd(vha, GID_PT_CMD, GID_PT_SNS_SCMD_LEN,
-	    GID_PT_SNS_DATA_SIZE);
+	    gid_pt_sns_data_size);
 
 	/* Prepare SNS command arguments -- port_type. */
 	sns_cmd->p.cmd.param[0] = NS_NX_PORT_TYPE;
@@ -839,7 +858,7 @@ qla2x00_sns_gid_pt(scsi_qla_host_t *vha, sw_info_t *list)
 		rval = QLA_FUNCTION_FAILED;
 	} else {
 		/* Set port IDs in switch info list. */
-		for (i = 0; i < MAX_FIBRE_DEVICES; i++) {
+		for (i = 0; i < ha->max_fibre_devices; i++) {
 			entry = &sns_cmd->p.gid_data[(i * 4) + 16];
 			list[i].d_id.b.domain = entry[1];
 			list[i].d_id.b.area = entry[2];
@@ -858,7 +877,7 @@ qla2x00_sns_gid_pt(scsi_qla_host_t *vha, sw_info_t *list)
 		 * single call.  Return a failed status, and let GA_NXT handle
 		 * the overload.
 		 */
-		if (i == MAX_FIBRE_DEVICES)
+		if (i == ha->max_fibre_devices)
 			rval = QLA_FUNCTION_FAILED;
 	}
 
@@ -877,12 +896,12 @@ qla2x00_sns_gid_pt(scsi_qla_host_t *vha, sw_info_t *list)
 static int
 qla2x00_sns_gpn_id(scsi_qla_host_t *vha, sw_info_t *list)
 {
-	int		rval;
+	int		rval = QLA_SUCCESS;
 	struct qla_hw_data *ha = vha->hw;
 	uint16_t	i;
 	struct sns_cmd_pkt	*sns_cmd;
 
-	for (i = 0; i < MAX_FIBRE_DEVICES; i++) {
+	for (i = 0; i < ha->max_fibre_devices; i++) {
 		/* Issue GPN_ID */
 		/* Prepare SNS command request. */
 		sns_cmd = qla2x00_prep_sns_cmd(vha, GPN_ID_CMD,
@@ -933,12 +952,12 @@ qla2x00_sns_gpn_id(scsi_qla_host_t *vha, sw_info_t *list)
 static int
 qla2x00_sns_gnn_id(scsi_qla_host_t *vha, sw_info_t *list)
 {
-	int		rval;
+	int		rval = QLA_SUCCESS;
 	struct qla_hw_data *ha = vha->hw;
 	uint16_t	i;
 	struct sns_cmd_pkt	*sns_cmd;
 
-	for (i = 0; i < MAX_FIBRE_DEVICES; i++) {
+	for (i = 0; i < ha->max_fibre_devices; i++) {
 		/* Issue GNN_ID */
 		/* Prepare SNS command request. */
 		sns_cmd = qla2x00_prep_sns_cmd(vha, GNN_ID_CMD,
@@ -1107,20 +1126,26 @@ qla2x00_sns_rnn_id(scsi_qla_host_t *vha)
 static int
 qla2x00_mgmt_svr_login(scsi_qla_host_t *vha)
 {
-	int ret;
+	int ret, rval;
 	uint16_t mb[MAILBOX_REGISTER_COUNT];
 	struct qla_hw_data *ha = vha->hw;
 	ret = QLA_SUCCESS;
 	if (vha->flags.management_server_logged_in)
 		return ret;
 
-	ha->isp_ops->fabric_login(vha, vha->mgmt_svr_loop_id, 0xff, 0xff, 0xfa,
-	    mb, BIT_1|BIT_0);
-	if (mb[0] != MBS_COMMAND_COMPLETE) {
-		ql_dbg(ql_dbg_disc, vha, 0x2024,
-		    "Failed management_server login: loopid=%x mb[0]=%x "
-		    "mb[1]=%x mb[2]=%x mb[6]=%x mb[7]=%x.\n",
-		    vha->mgmt_svr_loop_id, mb[0], mb[1], mb[2], mb[6], mb[7]);
+	rval = ha->isp_ops->fabric_login(vha, vha->mgmt_svr_loop_id, 0xff, 0xff,
+	    0xfa, mb, BIT_1);
+	if (rval != QLA_SUCCESS || mb[0] != MBS_COMMAND_COMPLETE) {
+		if (rval == QLA_MEMORY_ALLOC_FAILED)
+			ql_dbg(ql_dbg_disc, vha, 0x2085,
+			    "Failed management_server login: loopid=%x "
+			    "rval=%d\n", vha->mgmt_svr_loop_id, rval);
+		else
+			ql_dbg(ql_dbg_disc, vha, 0x2024,
+			    "Failed management_server login: loopid=%x "
+			    "mb[0]=%x mb[1]=%x mb[2]=%x mb[6]=%x mb[7]=%x.\n",
+			    vha->mgmt_svr_loop_id, mb[0], mb[1], mb[2], mb[6],
+			    mb[7]);
 		ret = QLA_FUNCTION_FAILED;
 	} else
 		vha->flags.management_server_logged_in = 1;
@@ -1303,8 +1328,8 @@ qla2x00_fdmi_rhba(scsi_qla_host_t *vha)
 	/* Manufacturer. */
 	eiter = (struct ct_fdmi_hba_attr *) (entries + size);
 	eiter->type = __constant_cpu_to_be16(FDMI_HBA_MANUFACTURER);
-	strcpy(eiter->a.manufacturer, "QLogic Corporation");
-	alen = strlen(eiter->a.manufacturer);
+	alen = strlen(QLA2XXX_MANUFACTURER);
+	strncpy(eiter->a.manufacturer, QLA2XXX_MANUFACTURER, alen + 1);
 	alen += (alen & 3) ? (4 - (alen & 3)) : 4;
 	eiter->len = cpu_to_be16(4 + alen);
 	size += 4 + alen;
@@ -1547,7 +1572,7 @@ qla2x00_fdmi_rpa(scsi_qla_host_t *vha)
 	eiter = (struct ct_fdmi_port_attr *) (entries + size);
 	eiter->type = __constant_cpu_to_be16(FDMI_PORT_SUPPORT_SPEED);
 	eiter->len = __constant_cpu_to_be16(4 + 4);
-	if (IS_QLA8XXX_TYPE(ha))
+	if (IS_CNA_CAPABLE(ha))
 		eiter->a.sup_speed = __constant_cpu_to_be32(
 		    FDMI_PORT_SPEED_10GB);
 	else if (IS_QLA25XX(ha))
@@ -1594,6 +1619,10 @@ qla2x00_fdmi_rpa(scsi_qla_host_t *vha)
 		eiter->a.cur_speed =
 		    __constant_cpu_to_be32(FDMI_PORT_SPEED_10GB);
 		break;
+	case PORT_SPEED_16GB:
+		eiter->a.cur_speed =
+		    __constant_cpu_to_be32(FDMI_PORT_SPEED_16GB);
+		break;
 	default:
 		eiter->a.cur_speed =
 		    __constant_cpu_to_be32(FDMI_PORT_SPEED_UNKNOWN);
@@ -1620,8 +1649,8 @@ qla2x00_fdmi_rpa(scsi_qla_host_t *vha)
 	/* OS device name. */
 	eiter = (struct ct_fdmi_port_attr *) (entries + size);
 	eiter->type = __constant_cpu_to_be16(FDMI_PORT_OS_DEVICE_NAME);
-	strcpy(eiter->a.os_dev_name, QLA2XXX_DRIVER_NAME);
-	alen = strlen(eiter->a.os_dev_name);
+	alen = strlen(QLA2XXX_DRIVER_NAME);
+	strncpy(eiter->a.os_dev_name, QLA2XXX_DRIVER_NAME, alen + 1);
 	alen += (alen & 3) ? (4 - (alen & 3)) : 4;
 	eiter->len = cpu_to_be16(4 + alen);
 	size += 4 + alen;
@@ -1724,7 +1753,7 @@ qla2x00_fdmi_register(scsi_qla_host_t *vha)
 int
 qla2x00_gfpn_id(scsi_qla_host_t *vha, sw_info_t *list)
 {
-	int		rval;
+	int		rval = QLA_SUCCESS;
 	uint16_t	i;
 	struct qla_hw_data *ha = vha->hw;
 	ms_iocb_entry_t	*ms_pkt;
@@ -1734,7 +1763,7 @@ qla2x00_gfpn_id(scsi_qla_host_t *vha, sw_info_t *list)
 	if (!IS_IIDMA_CAPABLE(ha))
 		return QLA_FUNCTION_FAILED;
 
-	for (i = 0; i < MAX_FIBRE_DEVICES; i++) {
+	for (i = 0; i < ha->max_fibre_devices; i++) {
 		/* Issue GFPN_ID */
 		/* Prepare common MS IOCB */
 		ms_pkt = ha->isp_ops->prep_ms_iocb(vha, GFPN_ID_REQ_SIZE,
@@ -1757,9 +1786,11 @@ qla2x00_gfpn_id(scsi_qla_host_t *vha, sw_info_t *list)
 			/*EMPTY*/
 			ql_dbg(ql_dbg_disc, vha, 0x2023,
 			    "GFPN_ID issue IOCB failed (%d).\n", rval);
+			break;
 		} else if (qla2x00_chk_ms_status(vha, ms_pkt, ct_rsp,
 		    "GFPN_ID") != QLA_SUCCESS) {
 			rval = QLA_FUNCTION_FAILED;
+			break;
 		} else {
 			/* Save fabric portname */
 			memcpy(list[i].fabric_port_name,
@@ -1846,7 +1877,7 @@ qla2x00_gpsc(scsi_qla_host_t *vha, sw_info_t *list)
 	if (rval)
 		return rval;
 
-	for (i = 0; i < MAX_FIBRE_DEVICES; i++) {
+	for (i = 0; i < ha->max_fibre_devices; i++) {
 		/* Issue GFPN_ID */
 		/* Prepare common MS IOCB */
 		ms_pkt = qla24xx_prep_ms_fm_iocb(vha, GPSC_REQ_SIZE,
@@ -1902,6 +1933,9 @@ qla2x00_gpsc(scsi_qla_host_t *vha, sw_info_t *list)
 			case BIT_11:
 				list[i].fp_speed = PORT_SPEED_8GB;
 				break;
+			case BIT_10:
+				list[i].fp_speed = PORT_SPEED_16GB;
+				break;
 			}
 
 			ql_dbg(ql_dbg_disc, vha, 0x205b,
@@ -1947,7 +1981,7 @@ qla2x00_gff_id(scsi_qla_host_t *vha, sw_info_t *list)
 	struct qla_hw_data *ha = vha->hw;
 	uint8_t fcp_scsi_features = 0;
 
-	for (i = 0; i < MAX_FIBRE_DEVICES; i++) {
+	for (i = 0; i < ha->max_fibre_devices; i++) {
 		/* Set default FC4 Type as UNKNOWN so the default is to
 		 * Process this port */
 		list[i].fc4_type = FC4_TYPE_UNKNOWN;

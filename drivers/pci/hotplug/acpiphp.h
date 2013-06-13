@@ -79,7 +79,6 @@ struct acpiphp_bridge {
 	/* Ejectable PCI-to-PCI bridge (PCI bridge and PCI function) */
 	struct acpiphp_func *func;
 
-	int type;
 	int nr_slots;
 
 	u32 flags;
@@ -89,8 +88,6 @@ struct acpiphp_bridge {
 
 	/* PCI-to-PCI bridge device */
 	struct pci_dev *pci_dev;
-
-	spinlock_t res_lock;
 };
 
 
@@ -148,10 +145,6 @@ struct acpiphp_attention_info
 /* PCI bus bridge HID */
 #define ACPI_PCI_HOST_HID		"PNP0A03"
 
-/* PCI BRIDGE type */
-#define BRIDGE_TYPE_HOST		0
-#define BRIDGE_TYPE_P2P			1
-
 /* ACPI _STA method value (ignore bit 4; battery present) */
 #define ACPI_STA_PRESENT		(0x00000001)
 #define ACPI_STA_ENABLED		(0x00000002)
@@ -160,13 +153,7 @@ struct acpiphp_attention_info
 #define ACPI_STA_ALL			(0x0000000f)
 
 /* bridge flags */
-#define BRIDGE_HAS_STA		(0x00000001)
-#define BRIDGE_HAS_EJ0		(0x00000002)
-#define BRIDGE_HAS_HPP		(0x00000004)
-#define BRIDGE_HAS_PS0		(0x00000010)
-#define BRIDGE_HAS_PS1		(0x00000020)
-#define BRIDGE_HAS_PS2		(0x00000040)
-#define BRIDGE_HAS_PS3		(0x00000080)
+#define BRIDGE_HAS_EJ0		(0x00000001)
 
 /* slot flags */
 
@@ -195,7 +182,6 @@ extern void acpiphp_unregister_hotplug_slot(struct acpiphp_slot *slot);
 /* acpiphp_glue.c */
 extern int acpiphp_glue_init (void);
 extern void acpiphp_glue_exit (void);
-extern int acpiphp_get_num_slots (void);
 typedef int (*acpiphp_callback)(struct acpiphp_slot *slot, void *data);
 
 extern int acpiphp_enable_slot (struct acpiphp_slot *slot);
@@ -207,6 +193,6 @@ extern u8 acpiphp_get_latch_status (struct acpiphp_slot *slot);
 extern u8 acpiphp_get_adapter_status (struct acpiphp_slot *slot);
 
 /* variables */
-extern int acpiphp_debug;
+extern bool acpiphp_debug;
 
 #endif /* _ACPIPHP_H */

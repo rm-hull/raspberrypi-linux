@@ -108,7 +108,7 @@ static int ocfs2_parse_options(struct super_block *sb, char *options,
 			       int is_remount);
 static int ocfs2_check_set_options(struct super_block *sb,
 				   struct mount_options *options);
-static int ocfs2_show_options(struct seq_file *s, struct vfsmount *mnt);
+static int ocfs2_show_options(struct seq_file *s, struct dentry *root);
 static void ocfs2_put_super(struct super_block *sb);
 static int ocfs2_mount_volume(struct super_block *sb);
 static int ocfs2_remount(struct super_block *sb, int *flags, char *data);
@@ -569,7 +569,6 @@ static struct inode *ocfs2_alloc_inode(struct super_block *sb)
 static void ocfs2_i_callback(struct rcu_head *head)
 {
 	struct inode *inode = container_of(head, struct inode, i_rcu);
-	INIT_LIST_HEAD(&inode->i_dentry);
 	kmem_cache_free(ocfs2_inode_cachep, OCFS2_I(inode));
 }
 
@@ -1155,11 +1154,11 @@ static int ocfs2_fill_super(struct super_block *sb, void *data, int silent)
 	}
 
 	status = ocfs2_mount_volume(sb);
-	if (osb->root_inode)
-		inode = igrab(osb->root_inode);
-
 	if (status < 0)
 		goto read_super_error;
+
+	if (osb->root_inode)
+		inode = igrab(osb->root_inode);
 
 	if (!inode) {
 		status = -EIO;
@@ -1167,7 +1166,7 @@ static int ocfs2_fill_super(struct super_block *sb, void *data, int silent)
 		goto read_super_error;
 	}
 
-	root = d_alloc_root(inode);
+	root = d_make_root(inode);
 	if (!root) {
 		status = -ENOMEM;
 		mlog_errno(status);
@@ -1221,9 +1220,6 @@ static int ocfs2_fill_super(struct super_block *sb, void *data, int silent)
 read_super_error:
 	brelse(bh);
 
-	if (inode)
-		iput(inode);
-
 	if (osb) {
 		atomic_set(&osb->vol_state, VOLUME_DISABLED);
 		wake_up(&osb->osb_mount_event);
@@ -1270,6 +1266,7 @@ static struct file_system_type ocfs2_fs_type = {
 	.fs_flags       = FS_REQUIRES_DEV|FS_RENAME_DOES_D_MOVE,
 	.next           = NULL
 };
+MODULE_ALIAS_FS("ocfs2");
 
 static int ocfs2_check_set_options(struct super_block *sb,
 				   struct mount_options *options)
@@ -1534,9 +1531,9 @@ bail:
 	return status;
 }
 
-static int ocfs2_show_options(struct seq_file *s, struct vfsmount *mnt)
+static int ocfs2_show_options(struct seq_file *s, struct dentry *root)
 {
-	struct ocfs2_super *osb = OCFS2_SB(mnt->mnt_sb);
+	struct ocfs2_super *osb = OCFS2_SB(root->d_sb);
 	unsigned long opts = osb->s_mount_opt;
 	unsigned int local_alloc_megs;
 
@@ -1568,8 +1565,7 @@ static int ocfs2_show_options(struct seq_file *s, struct vfsmount *mnt)
 	if (osb->preferred_slot != OCFS2_INVALID_SLOT)
 		seq_printf(s, ",preferred_slot=%d", osb->preferred_slot);
 
-	if (!(mnt->mnt_flags & MNT_NOATIME) && !(mnt->mnt_flags & MNT_RELATIME))
-		seq_printf(s, ",atime_quantum=%u", osb->s_atime_quantum);
+	seq_printf(s, ",atime_quantum=%u", osb->s_atime_quantum);
 
 	if (osb->osb_commit_interval)
 		seq_printf(s, ",commit=%u",
@@ -1629,21 +1625,17 @@ static int __init ocfs2_init(void)
 		init_waitqueue_head(&ocfs2__ioend_wq[i]);
 
 	status = init_ocfs2_uptodate_cache();
-	if (status < 0) {
-		mlog_errno(status);
-		goto leave;
-	}
+	if (status < 0)
+		goto out1;
 
 	status = ocfs2_initialize_mem_caches();
-	if (status < 0) {
-		mlog_errno(status);
-		goto leave;
-	}
+	if (status < 0)
+		goto out2;
 
 	ocfs2_wq = create_singlethread_workqueue("ocfs2_wq");
 	if (!ocfs2_wq) {
 		status = -ENOMEM;
-		goto leave;
+		goto out3;
 	}
 
 	ocfs2_debugfs_root = debugfs_create_dir("ocfs2", NULL);
@@ -1655,17 +1647,23 @@ static int __init ocfs2_init(void)
 	ocfs2_set_locking_protocol();
 
 	status = register_quota_format(&ocfs2_quota_format);
-leave:
-	if (status < 0) {
-		ocfs2_free_mem_caches();
-		exit_ocfs2_uptodate_cache();
-		mlog_errno(status);
-	}
+	if (status < 0)
+		goto out4;
+	status = register_filesystem(&ocfs2_fs_type);
+	if (!status)
+		return 0;
 
-	if (status >= 0) {
-		return register_filesystem(&ocfs2_fs_type);
-	} else
-		return -1;
+	unregister_quota_format(&ocfs2_quota_format);
+out4:
+	destroy_workqueue(ocfs2_wq);
+	debugfs_remove(ocfs2_debugfs_root);
+out3:
+	ocfs2_free_mem_caches();
+out2:
+	exit_ocfs2_uptodate_cache();
+out1:
+	mlog_errno(status);
+	return status;
 }
 
 static void __exit ocfs2_exit(void)
@@ -1821,6 +1819,11 @@ static int ocfs2_initialize_mem_caches(void)
 
 static void ocfs2_free_mem_caches(void)
 {
+	/*
+	 * Make sure all delayed rcu free inodes are flushed before we
+	 * destroy cache.
+	 */
+	rcu_barrier();
 	if (ocfs2_inode_cachep)
 		kmem_cache_destroy(ocfs2_inode_cachep);
 	ocfs2_inode_cachep = NULL;
@@ -2523,8 +2526,7 @@ static int ocfs2_check_volume(struct ocfs2_super *osb)
 		mlog_errno(status);
 
 finally:
-	if (local_alloc)
-		kfree(local_alloc);
+	kfree(local_alloc);
 
 	if (status)
 		mlog_errno(status);
@@ -2551,8 +2553,7 @@ static void ocfs2_delete_osb(struct ocfs2_super *osb)
 	 * we free it here.
 	 */
 	kfree(osb->journal);
-	if (osb->local_alloc_copy)
-		kfree(osb->local_alloc_copy);
+	kfree(osb->local_alloc_copy);
 	kfree(osb->uuid_str);
 	ocfs2_put_dlm_debug(osb->osb_dlm_debug);
 	memset(osb, 0, sizeof(struct ocfs2_super));

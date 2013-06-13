@@ -20,6 +20,7 @@
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/timer.h>
@@ -358,10 +359,12 @@ static void imx_keypad_inhibit(struct imx_keypad *keypad)
 	/* Inhibit KDI and KRI interrupts. */
 	reg_val = readw(keypad->mmio_base + KPSR);
 	reg_val &= ~(KBD_STAT_KRIE | KBD_STAT_KDIE);
+	reg_val |= KBD_STAT_KPKR | KBD_STAT_KPKD;
 	writew(reg_val, keypad->mmio_base + KPSR);
 
 	/* Colums as open drain and disable all rows */
-	writew(0xff00, keypad->mmio_base + KPCR);
+	reg_val = (keypad->cols_en_mask & 0xff) << 8;
+	writew(reg_val, keypad->mmio_base + KPCR);
 }
 
 static void imx_keypad_close(struct input_dev *dev)
@@ -378,20 +381,24 @@ static void imx_keypad_close(struct input_dev *dev)
 	imx_keypad_inhibit(keypad);
 
 	/* Disable clock unit */
-	clk_disable(keypad->clk);
+	clk_disable_unprepare(keypad->clk);
 }
 
 static int imx_keypad_open(struct input_dev *dev)
 {
 	struct imx_keypad *keypad = input_get_drvdata(dev);
+	int error;
 
 	dev_dbg(&dev->dev, ">%s\n", __func__);
+
+	/* Enable the kpp clock */
+	error = clk_prepare_enable(keypad->clk);
+	if (error)
+		return error;
 
 	/* We became active from now */
 	keypad->enabled = true;
 
-	/* Enable the kpp clock */
-	clk_enable(keypad->clk);
 	imx_keypad_config(keypad);
 
 	/* Sanity control, not all the rows must be actived now. */
@@ -408,15 +415,23 @@ open_err:
 	return -EIO;
 }
 
-static int __devinit imx_keypad_probe(struct platform_device *pdev)
+#ifdef CONFIG_OF
+static struct of_device_id imx_keypad_of_match[] = {
+	{ .compatible = "fsl,imx21-kpp", },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, imx_keypad_of_match);
+#endif
+
+static int imx_keypad_probe(struct platform_device *pdev)
 {
 	const struct matrix_keymap_data *keymap_data = pdev->dev.platform_data;
 	struct imx_keypad *keypad;
 	struct input_dev *input_dev;
 	struct resource *res;
-	int irq, error, i;
+	int irq, error, i, row, col;
 
-	if (keymap_data == NULL) {
+	if (!keymap_data && !pdev->dev.of_node) {
 		dev_err(&pdev->dev, "no keymap defined\n");
 		return -EINVAL;
 	}
@@ -467,28 +482,12 @@ static int __devinit imx_keypad_probe(struct platform_device *pdev)
 		goto failed_free_priv;
 	}
 
-	keypad->clk = clk_get(&pdev->dev, "kpp");
+	keypad->clk = clk_get(&pdev->dev, NULL);
 	if (IS_ERR(keypad->clk)) {
 		dev_err(&pdev->dev, "failed to get keypad clock\n");
 		error = PTR_ERR(keypad->clk);
 		goto failed_unmap;
 	}
-
-	/* Search for rows and cols enabled */
-	for (i = 0; i < keymap_data->keymap_size; i++) {
-		keypad->rows_en_mask |= 1 << KEY_ROW(keymap_data->keymap[i]);
-		keypad->cols_en_mask |= 1 << KEY_COL(keymap_data->keymap[i]);
-	}
-
-	if (keypad->rows_en_mask > ((1 << MAX_MATRIX_KEY_ROWS) - 1) ||
-	   keypad->cols_en_mask > ((1 << MAX_MATRIX_KEY_COLS) - 1)) {
-		dev_err(&pdev->dev,
-			"invalid key data (too many rows or colums)\n");
-		error = -EINVAL;
-		goto failed_clock_put;
-	}
-	dev_dbg(&pdev->dev, "enabled rows mask: %x\n", keypad->rows_en_mask);
-	dev_dbg(&pdev->dev, "enabled cols mask: %x\n", keypad->cols_en_mask);
 
 	/* Init the Input device */
 	input_dev->name = pdev->name;
@@ -496,19 +495,37 @@ static int __devinit imx_keypad_probe(struct platform_device *pdev)
 	input_dev->dev.parent = &pdev->dev;
 	input_dev->open = imx_keypad_open;
 	input_dev->close = imx_keypad_close;
-	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REP);
-	input_dev->keycode = keypad->keycodes;
-	input_dev->keycodesize = sizeof(keypad->keycodes[0]);
-	input_dev->keycodemax = ARRAY_SIZE(keypad->keycodes);
 
-	matrix_keypad_build_keymap(keymap_data, MATRIX_ROW_SHIFT,
-				keypad->keycodes, input_dev->keybit);
+	error = matrix_keypad_build_keymap(keymap_data, NULL,
+					   MAX_MATRIX_KEY_ROWS,
+					   MAX_MATRIX_KEY_COLS,
+					   keypad->keycodes, input_dev);
+	if (error) {
+		dev_err(&pdev->dev, "failed to build keymap\n");
+		goto failed_clock_put;
+	}
 
+	/* Search for rows and cols enabled */
+	for (row = 0; row < MAX_MATRIX_KEY_ROWS; row++) {
+		for (col = 0; col < MAX_MATRIX_KEY_COLS; col++) {
+			i = MATRIX_SCAN_CODE(row, col, MATRIX_ROW_SHIFT);
+			if (keypad->keycodes[i] != KEY_RESERVED) {
+				keypad->rows_en_mask |= 1 << row;
+				keypad->cols_en_mask |= 1 << col;
+			}
+		}
+	}
+	dev_dbg(&pdev->dev, "enabled rows mask: %x\n", keypad->rows_en_mask);
+	dev_dbg(&pdev->dev, "enabled cols mask: %x\n", keypad->cols_en_mask);
+
+	__set_bit(EV_REP, input_dev->evbit);
 	input_set_capability(input_dev, EV_MSC, MSC_SCAN);
 	input_set_drvdata(input_dev, keypad);
 
 	/* Ensure that the keypad will stay dormant until opened */
+	clk_prepare_enable(keypad->clk);
 	imx_keypad_inhibit(keypad);
+	clk_disable_unprepare(keypad->clk);
 
 	error = request_irq(irq, imx_keypad_irq_handler, 0,
 			    pdev->name, keypad);
@@ -544,7 +561,7 @@ failed_rel_mem:
 	return error;
 }
 
-static int __devexit imx_keypad_remove(struct platform_device *pdev)
+static int imx_keypad_remove(struct platform_device *pdev)
 {
 	struct imx_keypad *keypad = platform_get_drvdata(pdev);
 	struct resource *res;
@@ -578,7 +595,7 @@ static int imx_kbd_suspend(struct device *dev)
 	mutex_lock(&input_dev->mutex);
 
 	if (input_dev->users)
-		clk_disable(kbd->clk);
+		clk_disable_unprepare(kbd->clk);
 
 	mutex_unlock(&input_dev->mutex);
 
@@ -593,18 +610,23 @@ static int imx_kbd_resume(struct device *dev)
 	struct platform_device *pdev = to_platform_device(dev);
 	struct imx_keypad *kbd = platform_get_drvdata(pdev);
 	struct input_dev *input_dev = kbd->input_dev;
+	int ret = 0;
 
 	if (device_may_wakeup(&pdev->dev))
 		disable_irq_wake(kbd->irq);
 
 	mutex_lock(&input_dev->mutex);
 
-	if (input_dev->users)
-		clk_enable(kbd->clk);
+	if (input_dev->users) {
+		ret = clk_prepare_enable(kbd->clk);
+		if (ret)
+			goto err_clk;
+	}
 
+err_clk:
 	mutex_unlock(&input_dev->mutex);
 
-	return 0;
+	return ret;
 }
 #endif
 
@@ -615,23 +637,12 @@ static struct platform_driver imx_keypad_driver = {
 		.name	= "imx-keypad",
 		.owner	= THIS_MODULE,
 		.pm	= &imx_kbd_pm_ops,
+		.of_match_table = of_match_ptr(imx_keypad_of_match),
 	},
 	.probe		= imx_keypad_probe,
-	.remove		= __devexit_p(imx_keypad_remove),
+	.remove		= imx_keypad_remove,
 };
-
-static int __init imx_keypad_init(void)
-{
-	return platform_driver_register(&imx_keypad_driver);
-}
-
-static void __exit imx_keypad_exit(void)
-{
-	platform_driver_unregister(&imx_keypad_driver);
-}
-
-module_init(imx_keypad_init);
-module_exit(imx_keypad_exit);
+module_platform_driver(imx_keypad_driver);
 
 MODULE_AUTHOR("Alberto Panizzo <maramaopercheseimorto@gmail.com>");
 MODULE_DESCRIPTION("IMX Keypad Port Driver");

@@ -309,7 +309,7 @@ static ssize_t eeprom_93xx46_store_erase(struct device *dev,
 }
 static DEVICE_ATTR(erase, S_IWUSR, NULL, eeprom_93xx46_store_erase);
 
-static int __devinit eeprom_93xx46_probe(struct spi_device *spi)
+static int eeprom_93xx46_probe(struct spi_device *spi)
 {
 	struct eeprom_93xx46_platform_data *pd;
 	struct eeprom_93xx46_dev *edev;
@@ -370,7 +370,7 @@ fail:
 	return err;
 }
 
-static int __devexit eeprom_93xx46_remove(struct spi_device *spi)
+static int eeprom_93xx46_remove(struct spi_device *spi)
 {
 	struct eeprom_93xx46_dev *edev = dev_get_drvdata(&spi->dev);
 
@@ -389,20 +389,10 @@ static struct spi_driver eeprom_93xx46_driver = {
 		.owner	= THIS_MODULE,
 	},
 	.probe		= eeprom_93xx46_probe,
-	.remove		= __devexit_p(eeprom_93xx46_remove),
+	.remove		= eeprom_93xx46_remove,
 };
 
-static int __init eeprom_93xx46_init(void)
-{
-	return spi_register_driver(&eeprom_93xx46_driver);
-}
-module_init(eeprom_93xx46_init);
-
-static void __exit eeprom_93xx46_exit(void)
-{
-	spi_unregister_driver(&eeprom_93xx46_driver);
-}
-module_exit(eeprom_93xx46_exit);
+module_spi_driver(eeprom_93xx46_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Driver for 93xx46 EEPROMs");

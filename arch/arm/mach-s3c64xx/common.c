@@ -25,10 +25,11 @@
 #include <linux/dma-mapping.h>
 #include <linux/irq.h>
 #include <linux/gpio.h>
+#include <linux/irqchip/arm-vic.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
-#include <asm/hardware/vic.h>
+#include <asm/system_misc.h>
 
 #include <mach/map.h>
 #include <mach/hardware.h>
@@ -49,7 +50,7 @@
 
 /* uart registration process */
 
-void __init s3c64xx_init_uarts(struct s3c2410_uartcfg *cfg, int no)
+static void __init s3c64xx_init_uarts(struct s3c2410_uartcfg *cfg, int no)
 {
 	s3c24xx_init_uartdevs("s3c6400-uart", s3c64xx_uart_resources, cfg, no);
 }
@@ -154,7 +155,6 @@ void __init s3c64xx_init_io(struct map_desc *mach_desc, int size)
 	/* initialise the io descriptors we need for initialisation */
 	iotable_init(s3c_iodesc, ARRAY_SIZE(s3c_iodesc));
 	iotable_init(mach_desc, size);
-	init_consistent_dma_size(SZ_8M);
 
 	/* detect cpu id */
 	s3c64xx_init_cpu();
@@ -382,4 +382,9 @@ void s3c64xx_restart(char mode, const char *cmd)
 
 	/* if all else fails, or mode was for soft, jump to 0 */
 	soft_restart(0);
+}
+
+void __init s3c64xx_init_late(void)
+{
+	s3c64xx_pm_late_initcall();
 }

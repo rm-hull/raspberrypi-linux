@@ -24,23 +24,25 @@
 
 static mempool_t *page_pool, *isa_page_pool;
 
-#ifdef CONFIG_HIGHMEM
+#if defined(CONFIG_HIGHMEM) || defined(CONFIG_NEED_BOUNCE_POOL)
 static __init int init_emergency_pool(void)
 {
-#ifndef CONFIG_MEMORY_HOTPLUG
+#if defined(CONFIG_HIGHMEM) && !defined(CONFIG_MEMORY_HOTPLUG)
 	if (max_pfn <= max_low_pfn)
 		return 0;
 #endif
 
 	page_pool = mempool_create_page_pool(POOL_SIZE, 0);
 	BUG_ON(!page_pool);
-	printk("highmem bounce pool size: %d pages\n", POOL_SIZE);
+	printk("bounce pool size: %d pages\n", POOL_SIZE);
 
 	return 0;
 }
 
 __initcall(init_emergency_pool);
+#endif
 
+#ifdef CONFIG_HIGHMEM
 /*
  * highmem version, map in to vec
  */
@@ -50,9 +52,9 @@ static void bounce_copy_vec(struct bio_vec *to, unsigned char *vfrom)
 	unsigned char *vto;
 
 	local_irq_save(flags);
-	vto = kmap_atomic(to->bv_page, KM_BOUNCE_READ);
+	vto = kmap_atomic(to->bv_page);
 	memcpy(vto + to->bv_offset, vfrom, to->bv_len);
-	kunmap_atomic(vto, KM_BOUNCE_READ);
+	kunmap_atomic(vto);
 	local_irq_restore(flags);
 }
 
@@ -176,8 +178,45 @@ static void bounce_end_io_read_isa(struct bio *bio, int err)
 	__bounce_end_io_read(bio, isa_page_pool, err);
 }
 
+#ifdef CONFIG_NEED_BOUNCE_POOL
+static int must_snapshot_stable_pages(struct request_queue *q, struct bio *bio)
+{
+	struct page *page;
+	struct backing_dev_info *bdi;
+	struct address_space *mapping;
+	struct bio_vec *from;
+	int i;
+
+	if (bio_data_dir(bio) != WRITE)
+		return 0;
+
+	if (!bdi_cap_stable_pages_required(&q->backing_dev_info))
+		return 0;
+
+	/*
+	 * Based on the first page that has a valid mapping, decide whether or
+	 * not we have to employ bounce buffering to guarantee stable pages.
+	 */
+	bio_for_each_segment(from, bio, i) {
+		page = from->bv_page;
+		mapping = page_mapping(page);
+		if (!mapping)
+			continue;
+		bdi = mapping->backing_dev_info;
+		return mapping->host->i_sb->s_flags & MS_SNAP_STABLE;
+	}
+
+	return 0;
+}
+#else
+static int must_snapshot_stable_pages(struct request_queue *q, struct bio *bio)
+{
+	return 0;
+}
+#endif /* CONFIG_NEED_BOUNCE_POOL */
+
 static void __blk_queue_bounce(struct request_queue *q, struct bio **bio_orig,
-			       mempool_t *pool)
+			       mempool_t *pool, int force)
 {
 	struct page *page;
 	struct bio *bio = NULL;
@@ -190,7 +229,7 @@ static void __blk_queue_bounce(struct request_queue *q, struct bio **bio_orig,
 		/*
 		 * is destination page below bounce pfn?
 		 */
-		if (page_to_pfn(page) <= queue_bounce_pfn(q))
+		if (page_to_pfn(page) <= queue_bounce_pfn(q) && !force)
 			continue;
 
 		/*
@@ -268,6 +307,7 @@ static void __blk_queue_bounce(struct request_queue *q, struct bio **bio_orig,
 
 void blk_queue_bounce(struct request_queue *q, struct bio **bio_orig)
 {
+	int must_bounce;
 	mempool_t *pool;
 
 	/*
@@ -276,13 +316,15 @@ void blk_queue_bounce(struct request_queue *q, struct bio **bio_orig)
 	if (!bio_has_data(*bio_orig))
 		return;
 
+	must_bounce = must_snapshot_stable_pages(q, *bio_orig);
+
 	/*
 	 * for non-isa bounce case, just check if the bounce pfn is equal
 	 * to or bigger than the highest pfn in the system -- in that case,
 	 * don't waste time iterating over bio segments
 	 */
 	if (!(q->bounce_gfp & GFP_DMA)) {
-		if (queue_bounce_pfn(q) >= blk_max_pfn)
+		if (queue_bounce_pfn(q) >= blk_max_pfn && !must_bounce)
 			return;
 		pool = page_pool;
 	} else {
@@ -293,7 +335,7 @@ void blk_queue_bounce(struct request_queue *q, struct bio **bio_orig)
 	/*
 	 * slow path
 	 */
-	__blk_queue_bounce(q, bio_orig, pool);
+	__blk_queue_bounce(q, bio_orig, pool, must_bounce);
 }
 
 EXPORT_SYMBOL(blk_queue_bounce);

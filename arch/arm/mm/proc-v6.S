@@ -73,10 +73,19 @@ ENDPROC(cpu_v6_reset)
  *
  *	IRQs are already disabled.
  */
+
+/* See jira SW-5991 for details of this workaround */
 ENTRY(cpu_v6_do_idle)
-	mov	r1, #0
-	mcr	p15, 0, r1, c7, c10, 4		@ DWB - WFI may enter a low-power mode
-	mcr	p15, 0, r1, c7, c0, 4		@ wait for interrupt
+	.align 5
+	mov     r1, #2
+1:	subs	r1, #1
+	nop
+	mcreq	p15, 0, r1, c7, c10, 4		@ DWB - WFI may enter a low-power mode
+	mcreq	p15, 0, r1, c7, c0, 4		@ wait for interrupt
+	nop
+	nop
+	nop
+	bne 1b
 	mov	pc, lr
 
 ENTRY(cpu_v6_dcache_clean_area)
@@ -89,7 +98,7 @@ ENTRY(cpu_v6_dcache_clean_area)
 	mov	pc, lr
 
 /*
- *	cpu_arm926_switch_mm(pgd_phys, tsk)
+ *	cpu_v6_switch_mm(pgd_phys, tsk)
  *
  *	Set the translation table base pointer to be pgd_phys
  *
@@ -101,12 +110,18 @@ ENTRY(cpu_v6_dcache_clean_area)
 ENTRY(cpu_v6_switch_mm)
 #ifdef CONFIG_MMU
 	mov	r2, #0
-	ldr	r1, [r1, #MM_CONTEXT_ID]	@ get mm->context.id
+	mmid	r1, r1				@ get mm->context.id
 	ALT_SMP(orr	r0, r0, #TTB_FLAGS_SMP)
 	ALT_UP(orr	r0, r0, #TTB_FLAGS_UP)
 	mcr	p15, 0, r2, c7, c5, 6		@ flush BTAC/BTB
 	mcr	p15, 0, r2, c7, c10, 4		@ drain write buffer
 	mcr	p15, 0, r0, c2, c0, 0		@ set TTB 0
+#ifdef CONFIG_PID_IN_CONTEXTIDR
+	mrc	p15, 0, r2, c13, c0, 1		@ read current context ID
+	bic	r2, r2, #0xff			@ extract the PID
+	and	r1, r1, #0xff
+	orr	r1, r1, r2			@ insert into new context ID
+#endif
 	mcr	p15, 0, r1, c13, c0, 1		@ set context ID
 #endif
 	mov	pc, lr
@@ -132,7 +147,7 @@ ENTRY(cpu_v6_set_pte_ext)
 /* Suspend/resume support: taken from arch/arm/mach-s3c64xx/sleep.S */
 .globl	cpu_v6_suspend_size
 .equ	cpu_v6_suspend_size, 4 * 6
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_ARM_CPU_SUSPEND
 ENTRY(cpu_v6_do_suspend)
 	stmfd	sp!, {r4 - r9, lr}
 	mrc	p15, 0, r4, c13, c0, 0	@ FCSE/PID

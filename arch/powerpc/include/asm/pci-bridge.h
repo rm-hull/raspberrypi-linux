@@ -30,6 +30,7 @@ struct pci_controller {
 	int first_busno;
 	int last_busno;
 	int self_busno;
+	struct resource busn;
 
 	void __iomem *io_base_virt;
 #ifdef CONFIG_PPC64
@@ -155,14 +156,7 @@ struct pci_dn {
 
 	struct	pci_dev *pcidev;	/* back-pointer to the pci device */
 #ifdef CONFIG_EEH
-	int	class_code;		/* pci device class */
-	int	eeh_mode;		/* See eeh.h for possible EEH_MODEs */
-	int	eeh_config_addr;
-	int	eeh_pe_config_addr; /* new-style partition endpoint address */
-	int	eeh_check_count;	/* # times driver ignored error */
-	int	eeh_freeze_count;	/* # times this device froze up. */
-	int	eeh_false_positives;	/* # times this device reported #ff's */
-	u32	config_space[16];	/* saved PCI config space */
+	struct eeh_dev *edev;		/* eeh device */
 #endif
 #define IODA_INVALID_PE		(-1)
 #ifdef CONFIG_PPC_POWERNV
@@ -185,10 +179,28 @@ static inline int pci_device_from_OF_node(struct device_node *np,
 	return 0;
 }
 
+#if defined(CONFIG_EEH)
+static inline struct eeh_dev *of_node_to_eeh_dev(struct device_node *dn)
+{
+	/*
+	 * For those OF nodes whose parent isn't PCI bridge, they
+	 * don't have PCI_DN actually. So we have to skip them for
+	 * any EEH operations.
+	 */
+	if (!dn || !PCI_DN(dn))
+		return NULL;
+
+	return PCI_DN(dn)->edev;
+}
+#else
+#define of_node_to_eeh_dev(x) (NULL)
+#endif
+
 /** Find the bus corresponding to the indicated device node */
 extern struct pci_bus *pcibios_find_pci_bus(struct device_node *dn);
 
 /** Remove all of the PCI devices under this bus */
+extern void __pcibios_remove_pci_devices(struct pci_bus *bus, int purge_pe);
 extern void pcibios_remove_pci_devices(struct pci_bus *bus);
 
 /** Discover new pci devices under this bus, and add them */
@@ -226,7 +238,6 @@ extern void pci_process_bridge_OF_ranges(struct pci_controller *hose,
 /* Allocate & free a PCI host bridge structure */
 extern struct pci_controller *pcibios_alloc_controller(struct device_node *dev);
 extern void pcibios_free_controller(struct pci_controller *phb);
-extern void pcibios_setup_phb_resources(struct pci_controller *hose);
 
 #ifdef CONFIG_PCI
 extern int pcibios_vaddr_is_ioport(void __iomem *address);

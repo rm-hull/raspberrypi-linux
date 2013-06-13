@@ -1,7 +1,7 @@
 /*******************************************************************************
 
   Intel(R) Gigabit Ethernet Linux driver
-  Copyright(c) 2007-2011 Intel Corporation.
+  Copyright(c) 2007-2013 Intel Corporation.
 
   This program is free software; you can redistribute it and/or modify it
   under the terms and conditions of the GNU General Public License,
@@ -75,6 +75,14 @@
 #define E1000_FCRTL    0x02160  /* Flow Control Receive Threshold Low - RW */
 #define E1000_FCRTH    0x02168  /* Flow Control Receive Threshold High - RW */
 #define E1000_FCRTV    0x02460  /* Flow Control Refresh Timer Value - RW */
+#define E1000_I2CPARAMS        0x0102C /* SFPI2C Parameters Register - RW */
+#define E1000_I2CBB_EN      0x00000100  /* I2C - Bit Bang Enable */
+#define E1000_I2C_CLK_OUT   0x00000200  /* I2C- Clock */
+#define E1000_I2C_DATA_OUT  0x00000400  /* I2C- Data Out */
+#define E1000_I2C_DATA_OE_N 0x00000800  /* I2C- Data Output Enable */
+#define E1000_I2C_DATA_IN   0x00001000  /* I2C- Data In */
+#define E1000_I2C_CLK_OE_N  0x00002000  /* I2C- Clock Output Enable */
+#define E1000_I2C_CLK_IN    0x00004000  /* I2C- Clock In */
 
 /* IEEE 1588 TIMESYNCH */
 #define E1000_TSYNCRXCTL 0x0B620 /* Rx Time Sync Control register - RW */
@@ -91,6 +99,8 @@
 #define E1000_TIMINCA    0x0B608 /* Increment attributes register - RW */
 #define E1000_TSAUXC     0x0B640 /* Timesync Auxiliary Control register */
 #define E1000_SYSTIMR    0x0B6F8 /* System time register Residue */
+#define E1000_TSICR      0x0B66C /* Interrupt Cause Register */
+#define E1000_TSIM       0x0B674 /* Interrupt Mask Register */
 
 /* Filtering Registers */
 #define E1000_SAQF(_n) (0x5980 + 4 * (_n))
@@ -117,10 +127,19 @@
 
 /* TX Rate Limit Registers */
 #define E1000_RTTDQSEL	0x3604	/* Tx Desc Plane Queue Select - WO */
+#define E1000_RTTBCNRM	0x3690	/* Tx BCN Rate-scheduler MMW */
 #define E1000_RTTBCNRC	0x36B0	/* Tx BCN Rate-Scheduler Config - WO */
 
 /* Split and Replication RX Control - RW */
 #define E1000_RXPBS    0x02404  /* Rx Packet Buffer Size - RW */
+
+/* Thermal sensor configuration and status registers */
+#define E1000_THMJT	0x08100 /* Junction Temperature */
+#define E1000_THLOWTC	0x08104 /* Low Threshold Control */
+#define E1000_THMIDTC	0x08108 /* Mid Threshold Control */
+#define E1000_THHIGHTC	0x0810C /* High Threshold Control */
+#define E1000_THSTAT	0x08110 /* Thermal Sensor Status */
+
 /*
  * Convenience macros
  *
@@ -155,8 +174,12 @@
 				    : (0x0E018 + ((_n) * 0x40)))
 #define E1000_TXDCTL(_n)  ((_n) < 4 ? (0x03828 + ((_n) * 0x100)) \
 				    : (0x0E028 + ((_n) * 0x40)))
-#define E1000_DCA_TXCTRL(_n) (0x03814 + (_n << 8))
-#define E1000_DCA_RXCTRL(_n) (0x02814 + (_n << 8))
+#define E1000_RXCTL(_n)	  ((_n) < 4 ? (0x02814 + ((_n) * 0x100)) : \
+				      (0x0C014 + ((_n) * 0x40)))
+#define E1000_DCA_RXCTRL(_n)	E1000_RXCTL(_n)
+#define E1000_TXCTL(_n)   ((_n) < 4 ? (0x03814 + ((_n) * 0x100)) : \
+				      (0x0E014 + ((_n) * 0x40)))
+#define E1000_DCA_TXCTRL(_n) E1000_TXCTL(_n)
 #define E1000_TDWBAL(_n)  ((_n) < 4 ? (0x03838 + ((_n) * 0x100)) \
 				    : (0x0E038 + ((_n) * 0x40)))
 #define E1000_TDWBAH(_n)  ((_n) < 4 ? (0x0383C + ((_n) * 0x100)) \
@@ -342,6 +365,7 @@
 /* Energy Efficient Ethernet "EEE" register */
 #define E1000_IPCNFG  0x0E38  /* Internal PHY Configuration */
 #define E1000_EEER    0x0E30  /* Energy Efficient Ethernet */
+#define E1000_EEE_SU  0X0E34  /* EEE Setup */
 
 /* Thermal Sensor Register */
 #define E1000_THSTAT    0x08110 /* Thermal Sensor Status */
@@ -351,5 +375,19 @@
 #define E1000_B2OGPRC   0x04158 /* BMC2OS packets received by host */
 #define E1000_O2BGPTC   0x08FE4 /* OS2BMC packets received by BMC */
 #define E1000_O2BSPC    0x0415C /* OS2BMC packets transmitted by host */
+
+#define E1000_SRWR		0x12018  /* Shadow Ram Write Register - RW */
+#define E1000_I210_FLMNGCTL	0x12038
+#define E1000_I210_FLMNGDATA	0x1203C
+#define E1000_I210_FLMNGCNT	0x12040
+
+#define E1000_I210_FLSWCTL	0x12048
+#define E1000_I210_FLSWDATA	0x1204C
+#define E1000_I210_FLSWCNT	0x12050
+
+#define E1000_I210_FLA		0x1201C
+
+#define E1000_INVM_DATA_REG(_n)	(0x12120 + 4*(_n))
+#define E1000_INVM_SIZE		64 /* Number of INVM Data Registers */
 
 #endif

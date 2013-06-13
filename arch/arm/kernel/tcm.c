@@ -16,7 +16,7 @@
 #include <asm/cputype.h>
 #include <asm/mach/map.h>
 #include <asm/memory.h>
-#include "tcm.h"
+#include <asm/system_info.h>
 
 static struct gen_pool *tcm_pool;
 static bool dtcm_present;

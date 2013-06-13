@@ -91,7 +91,7 @@ static inline void update_tty_status(struct ser_device *ser)
 		ser->tty->hw_stopped << 4 |
 		ser->tty->flow_stopped << 3 |
 		ser->tty->packet << 2 |
-		ser->tty->low_latency << 1 |
+		ser->tty->port->low_latency << 1 |
 		ser->tty->warned;
 }
 static inline void debugfs_init(struct ser_device *ser, struct tty_struct *tty)
@@ -325,6 +325,9 @@ static int ldisc_open(struct tty_struct *tty)
 
 	sprintf(name, "cf%s", tty->name);
 	dev = alloc_netdev(sizeof(*ser), name, caifdev_setup);
+	if (!dev)
+		return -ENOMEM;
+
 	ser = netdev_priv(dev);
 	ser->tty = tty_kref_get(tty);
 	ser->dev = dev;

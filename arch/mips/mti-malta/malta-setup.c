@@ -78,9 +78,9 @@ const char *get_system_type(void)
 }
 
 #if defined(CONFIG_MIPS_MT_SMTC)
-const char display_string[] = "       SMTC LINUX ON MALTA       ";
+const char display_string[] = "	      SMTC LINUX ON MALTA	";
 #else
-const char display_string[] = "        LINUX ON MALTA       ";
+const char display_string[] = "	       LINUX ON MALTA	    ";
 #endif /* CONFIG_MIPS_MT_SMTC */
 
 #ifdef CONFIG_BLK_DEV_FD
@@ -111,7 +111,7 @@ static void __init pci_clock_check(void)
 	unsigned int __iomem *jmpr_p =
 		(unsigned int *) ioremap(MALTA_JMPRS_REG, sizeof(unsigned int));
 	int jmpr = (__raw_readl(jmpr_p) >> 2) & 0x07;
-	static const int pciclocks[] __initdata = {
+	static const int pciclocks[] __initconst = {
 		33, 20, 25, 30, 12, 16, 37, 10
 	};
 	int pciclock = pciclocks[jmpr];

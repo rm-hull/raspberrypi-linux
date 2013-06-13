@@ -18,7 +18,6 @@
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
-#include <ctype.h>
 #include "util.h"
 #include <dirent.h>
 #include <mntent.h>
@@ -69,7 +68,7 @@ struct events {
 };
 
 
-void *malloc_or_die(unsigned int size)
+static void *malloc_or_die(unsigned int size)
 {
 	void *data;
 
@@ -448,6 +447,8 @@ static void tracing_data_header(void)
 		buf[0] = 1;
 	else
 		buf[0] = 0;
+
+	read_trace_init(buf[0], buf[0]);
 
 	write_or_die(buf, 1);
 
