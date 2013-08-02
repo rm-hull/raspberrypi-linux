@@ -77,7 +77,7 @@ int queued_port[MAX_EPS_CHANNELS];
 #ifdef FIQ_DEBUG
 char buffer[1000*16];
 int wptr;
-void _fiq_print(FIQDBG_T dbg_lvl, char *fmt, ...)
+void notrace _fiq_print(FIQDBG_T dbg_lvl, char *fmt, ...)
 {
 	FIQDBG_T dbg_lvl_req = FIQDBG_PORTHUB;
 	va_list args;
@@ -101,7 +101,7 @@ void _fiq_print(FIQDBG_T dbg_lvl, char *fmt, ...)
 }
 #endif
 
-void fiq_queue_request(int channel, int odd_frame)
+void notrace fiq_queue_request(int channel, int odd_frame)
 {
 	hcchar_data_t   hcchar   = { .d32 = FIQ_READ(dwc_regs_base + 0x500 + (channel * 0x20) + 0x0)  };
 	hcsplt_data_t   hcsplt   = { .d32 = FIQ_READ(dwc_regs_base + 0x500 + (channel * 0x20) + 0x4)  };
@@ -147,7 +147,7 @@ static int last_sof = -1;
 */
 int diff;
 
-int fiq_sof_handle(hfnum_data_t hfnum)
+int notrace fiq_sof_handle(hfnum_data_t hfnum)
 {
 	int handled = 0;
 	int i;
@@ -206,12 +206,12 @@ int fiq_sof_handle(hfnum_data_t hfnum)
 	return handled;
 }
 
-int port_id(hcsplt_data_t hcsplt)
+int notrace port_id(hcsplt_data_t hcsplt)
 {
 	return hcsplt.b.prtaddr + (hcsplt.b.hubaddr << 8);
 }
 
-int fiq_hcintr_handle(int channel, hfnum_data_t hfnum)
+int notrace fiq_hcintr_handle(int channel, hfnum_data_t hfnum)
 {
 	hcchar_data_t   hcchar   = { .d32 = FIQ_READ(dwc_regs_base + 0x500 + (channel * 0x20) + 0x0) };
 	hcsplt_data_t   hcsplt   = { .d32 = FIQ_READ(dwc_regs_base + 0x500 + (channel * 0x20) + 0x4) };
@@ -361,7 +361,7 @@ gintmsk_data_t gintmsk;
 gintsts_data_t triggered, handled, keep;
 hfnum_data_t hfnum;
 
-void __attribute__ ((naked)) dwc_otg_hcd_handle_fiq(void)
+void __attribute__ ((naked)) notrace dwc_otg_hcd_handle_fiq(void)
 {
 
 	/* entry takes care to store registers we will be treading on here */
@@ -1328,9 +1328,19 @@ static void release_channel(dwc_otg_hcd_t * hcd,
 #ifdef FIQ_DEBUG
 	int endp = qtd->urb ? qtd->urb->pipe_info.ep_num : 0;
 #endif
+	int hog_port = 0;
 
 	DWC_DEBUGPL(DBG_HCDV, "  %s: channel %d, halt_status %d, xfer_len %d\n",
 		    __func__, hc->hc_num, halt_status, hc->xfer_len);
+
+	if(fiq_split_enable && hc->do_split) {
+		if(!hc->ep_is_in && hc->ep_type == UE_ISOCHRONOUS) {
+			if(hc->xact_pos == DWC_HCSPLIT_XACTPOS_MID || 
+					hc->xact_pos == DWC_HCSPLIT_XACTPOS_BEGIN) {
+				hog_port = 1;
+			}
+		}
+	}
 
 	switch (halt_status) {
 	case DWC_OTG_HC_XFER_URB_COMPLETE:
@@ -1417,11 +1427,14 @@ cleanup:
 			fiq_print(FIQDBG_ERR, "PRTNOTAL");
 			//BUG();
 		}
-
-		hcd->hub_port[hc->hub_addr] &= ~(1 << hc->port_addr);
-		hcd->hub_port_alloc[hc->hub_addr * 16 + hc->port_addr] = -1;
-
-		fiq_print(FIQDBG_PORTHUB, "H%dP%d:RR%d", hc->hub_addr, hc->port_addr, endp);
+		if(!hog_port && (hc->ep_type == DWC_OTG_EP_TYPE_ISOC ||
+				hc->ep_type == DWC_OTG_EP_TYPE_INTR)) {
+			hcd->hub_port[hc->hub_addr] &= ~(1 << hc->port_addr);
+#ifdef FIQ_DEBUG
+			hcd->hub_port_alloc[hc->hub_addr * 16 + hc->port_addr] = -1;
+#endif
+			fiq_print(FIQDBG_PORTHUB, "H%dP%d:RR%d", hc->hub_addr, hc->port_addr, endp);
+		}
 	}
 
 	/* Try to queue more transfers now that there's a free channel. */
@@ -2577,12 +2590,24 @@ static void handle_hc_chhltd_intr_dma(dwc_otg_hcd_t * hcd,
 				     DWC_READ_REG32(&hcd->
 						    core_if->core_global_regs->
 						    gintsts));
+				/* Failthrough: use 3-strikes rule */
+				qtd->error_count++;
+				dwc_otg_hcd_save_data_toggle(hc, hc_regs, qtd);
+				update_urb_state_xfer_intr(hc, hc_regs,
+					   qtd->urb, qtd, DWC_OTG_HC_XFER_XACT_ERR);
+				halt_channel(hcd, hc, qtd, DWC_OTG_HC_XFER_XACT_ERR);
 			}
 
 		}
 	} else {
 		DWC_PRINTF("NYET/NAK/ACK/other in non-error case, 0x%08x\n",
 			   hcint.d32);
+		/* Failthrough: use 3-strikes rule */
+		qtd->error_count++;
+		dwc_otg_hcd_save_data_toggle(hc, hc_regs, qtd);
+		update_urb_state_xfer_intr(hc, hc_regs,
+			   qtd->urb, qtd, DWC_OTG_HC_XFER_XACT_ERR);
+		halt_channel(hcd, hc, qtd, DWC_OTG_HC_XFER_XACT_ERR);
 	}
 }
 

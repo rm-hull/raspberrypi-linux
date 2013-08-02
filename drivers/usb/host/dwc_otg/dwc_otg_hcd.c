@@ -464,7 +464,6 @@ int dwc_otg_hcd_urb_enqueue(dwc_otg_hcd_t * hcd,
 			    dwc_otg_hcd_urb_t * dwc_otg_urb, void **ep_handle,
 			    int atomic_alloc)
 {
-	dwc_irqflags_t flags;
 	int retval = 0;
 	uint8_t needs_scheduling = 0;
 	dwc_otg_transaction_type_e tr_type;
@@ -515,12 +514,10 @@ int dwc_otg_hcd_urb_enqueue(dwc_otg_hcd_t * hcd,
 	}
 
 	if(needs_scheduling) {
-		DWC_SPINLOCK_IRQSAVE(hcd->lock, &flags);
 		tr_type = dwc_otg_hcd_select_transactions(hcd);
 		if (tr_type != DWC_OTG_TRANSACTION_NONE) {
 			dwc_otg_hcd_queue_transactions(hcd, tr_type);
 		}
-		DWC_SPINUNLOCK_IRQRESTORE(hcd->lock, flags);
 	}
 	return retval;
 }
@@ -986,7 +983,9 @@ int dwc_otg_hcd_init(dwc_otg_hcd_t * hcd, dwc_otg_core_if_t * core_if)
 	hcd->periodic_qh_count = 0;
 
 	DWC_MEMSET(hcd->hub_port, 0, sizeof(hcd->hub_port));
+#ifdef FIQ_DEBUG
 	DWC_MEMSET(hcd->hub_port_alloc, -1, sizeof(hcd->hub_port_alloc));
+#endif
 
 out:
 	return retval;
@@ -1320,7 +1319,9 @@ int dwc_otg_hcd_allocate_port(dwc_otg_hcd_t * hcd, dwc_otg_qh_t *qh)
 		qh->skip_count = 0;
 		hcd->hub_port[hub_addr] |= 1 << port_addr;
 		fiq_print(FIQDBG_PORTHUB, "H%dP%d:A %d", hub_addr, port_addr, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->pipe_info.ep_num);
+#ifdef FIQ_DEBUG
 		hcd->hub_port_alloc[hub_addr * 16 + port_addr] = dwc_otg_hcd_get_frame_number(hcd);
+#endif
 		return 0;
 	}
 }
@@ -1334,8 +1335,9 @@ void dwc_otg_hcd_release_port(dwc_otg_hcd_t * hcd, dwc_otg_qh_t *qh)
 	hcd->fops->hub_info(hcd, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->priv, &hub_addr, &port_addr);
 
 	hcd->hub_port[hub_addr] &= ~(1 << port_addr);
+#ifdef FIQ_DEBUG
 	hcd->hub_port_alloc[hub_addr * 16 + port_addr] = -1;
-
+#endif
 	fiq_print(FIQDBG_PORTHUB, "H%dP%d:RO%d", hub_addr, port_addr, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->pipe_info.ep_num);
 
 }
@@ -1354,6 +1356,7 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 {
 	dwc_list_link_t *qh_ptr;
 	dwc_otg_qh_t *qh;
+	dwc_otg_qtd_t *qtd;
 	int num_channels;
 	dwc_irqflags_t flags;
 	dwc_spinlock_t *channel_lock = hcd->channel_lock;
@@ -1377,11 +1380,18 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 
 		qh = DWC_LIST_ENTRY(qh_ptr, dwc_otg_qh_t, qh_list_entry);
 
-		if(qh->do_split && dwc_otg_hcd_allocate_port(hcd, qh))
-		{
-			qh_ptr = DWC_LIST_NEXT(qh_ptr);
-			g_next_sched_frame = dwc_frame_num_inc(dwc_otg_hcd_get_frame_number(hcd), 1);
-			continue;
+		if(qh->do_split) {
+			qtd = DWC_CIRCLEQ_FIRST(&qh->qtd_list);
+			if(!(qh->ep_type == UE_ISOCHRONOUS &&
+					(qtd->isoc_split_pos == DWC_HCSPLIT_XACTPOS_MID ||
+					qtd->isoc_split_pos == DWC_HCSPLIT_XACTPOS_END))) {
+				if(dwc_otg_hcd_allocate_port(hcd, qh))
+				{
+					qh_ptr = DWC_LIST_NEXT(qh_ptr);
+					g_next_sched_frame = dwc_frame_num_inc(dwc_otg_hcd_get_frame_number(hcd), 1);
+					continue;
+				}
+			}
 		}
 
 		if (microframe_schedule) {
@@ -1449,18 +1459,10 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 			}
 		}
 
-		if (qh->do_split && dwc_otg_hcd_allocate_port(hcd, qh))
-		{
-			g_next_sched_frame = dwc_frame_num_inc(dwc_otg_hcd_get_frame_number(hcd), 1);
-			qh_ptr = DWC_LIST_NEXT(qh_ptr);
-			continue;
-		}
-
 		if (microframe_schedule) {
 				DWC_SPINLOCK_IRQSAVE(channel_lock, &flags);
 				if (hcd->available_host_channels < 1) {
 					DWC_SPINUNLOCK_IRQRESTORE(channel_lock, flags);
-					if(qh->do_split) dwc_otg_hcd_release_port(hcd, qh);
 					break;
 				}
 				hcd->available_host_channels--;
